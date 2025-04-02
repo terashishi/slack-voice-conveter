@@ -105,12 +105,6 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
     // イベントの重複確認用キーを作成
     const eventKey = createEventKey(data);
     
-    // 重複イベントのチェック
-    if (isDuplicateEvent(eventKey)) {
-      logInfo(`重複イベントを検出しました: ${eventKey}`);
-      return ContentService.createTextOutput('Duplicate event');
-    }
-    
     // ボイスメモファイル共有処理（file_sharedイベント または message/file_shareイベント）
     if (data.event.type === 'file_shared') {
       logInfo('ファイル共有イベント（file_shared）を検出しました');
@@ -135,8 +129,14 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
         return ContentService.createTextOutput('Not an audio file');
       }
       
+      // 重複イベントのチェック
+      if (isDuplicateEvent(eventKey)) {
+        logInfo(`重複イベントを検出しました: ${eventKey}`);
+        return ContentService.createTextOutput('Duplicate event');
+      }
+      
       // ボイスメモ処理の実行
-      processVoiceMemo(data.event);
+      processVoiceMemoWithDelay(data.event);
     }
     else {
       logInfo(`サポート外のイベント: type=${data.event.type}, subtype=${data.event.subtype}`);
@@ -184,22 +184,20 @@ function isDuplicateEvent(eventKey: string): boolean {
   return false;
 }
 /**
- * Slackのトランスクリプト機能を利用した音声メモ処理
- * Google Cloud Speech-to-Text APIを使用せず、Slackのネイティブトランスクリプトを活用
+ * 遅延処理でトランスクリプトを再取得する
  */
-function processVoiceMemo(event: any): void {
+function processVoiceMemoWithDelay(event: any): void {
   try {
-    // ファイル情報取得準備
     const fileId = event.files && event.files[0] && event.files[0].id;
+    const channelId = event.channel;
+    const timestamp = event.ts;
     
     if (!fileId) {
       logError("ファイルIDが見つかりません");
       return;
     }
     
-    logInfo(`ファイルID: ${fileId} の処理を開始します`);
-    
-    // Slack APIでファイル情報を取得（改善版）
+    // まず初回チェック
     const fileInfo = getFileInfo(fileId);
     
     if (!fileInfo || !fileInfo.file) {
@@ -209,10 +207,7 @@ function processVoiceMemo(event: any): void {
     
     const file = fileInfo.file;
     
-    // ファイル情報のログ出力を詳細に
-    logInfo(`ファイル詳細: id=${file.id}, type=${file.mimetype}, name=${file.name}`);
-    
-    // MIMEタイプでの音声ファイル確認（より広範なサポート）
+    // 音声ファイルであることを確認
     if (!file.mimetype || !(/^audio\/|^video\/|.*mp4$/.test(file.mimetype))) {
       logInfo(`音声ファイルではありません: ${file.mimetype}`);
       return;
@@ -220,11 +215,115 @@ function processVoiceMemo(event: any): void {
     
     logInfo('✅ 音声ファイルを検出しました');
     
-    // Slackのトランスクリプションを取得して処理
-    useSlackTranscription(file, event.channel, event.ts);
-    
+    // トランスクリプションの状態を確認
+    if (file.transcription && file.transcription.status === 'complete') {
+      // すでに完了している場合は即時処理
+      useSlackTranscription(file, channelId, timestamp);
+    } else {
+      // まだ処理中の場合は、ユーザーに処理中のメッセージを送信し、遅延処理をスケジュール
+      // postTranscription(channelId, "音声の文字起こしを処理中です。完了したら自動的に結果を投稿します。");
+      
+      // トリガーを設定して10秒後に再試行
+      ScriptApp.newTrigger('retryTranscriptionCheck')
+        .timeBased()
+        .after(10000) // 10秒後
+        .create();
+      
+      // 再試行に必要な情報をプロパティに保存
+      PropertiesService.getScriptProperties().setProperty(
+        'PENDING_TRANSCRIPTION', 
+        JSON.stringify({
+          fileId: fileId,
+          channelId: channelId,
+          timestamp: timestamp,
+          retryCount: 0,
+          maxRetries: 6 // 最大6回試行（計60秒）
+        })
+      );
+    }
   } catch (error) {
     logError(`ボイスメモ処理エラー: ${JSON.stringify(error)}`);
+  }
+}
+
+/**
+ * トランスクリプション再チェック関数
+ * タイムトリガーから呼び出される
+ */
+function retryTranscriptionCheck(): void {
+  try {
+    // 保存された情報を取得
+    const pendingDataStr = PropertiesService.getScriptProperties().getProperty('PENDING_TRANSCRIPTION');
+    if (!pendingDataStr) {
+      logError("再試行情報が見つかりません");
+      return;
+    }
+    
+    const pendingData = JSON.parse(pendingDataStr);
+    const { fileId, channelId, timestamp, retryCount, maxRetries } = pendingData;
+    
+    logInfo(`トランスクリプション再チェック: ファイルID=${fileId}, 試行回数=${retryCount+1}/${maxRetries}`);
+    
+    // ファイル情報を再取得
+    const fileInfo = getFileInfo(fileId);
+    
+    if (!fileInfo || !fileInfo.file) {
+      logError("ファイル情報の再取得に失敗");
+      cleanupPendingTranscription();
+      return;
+    }
+    
+    const file = fileInfo.file;
+    
+    // トランスクリプションの状態を確認
+    if (file.transcription && file.transcription.status === 'complete') {
+      // 完了していたら処理実行
+      logInfo("トランスクリプション完了を検出、処理を実行します");
+      useSlackTranscription(file, channelId, timestamp);
+      
+      // 保存データをクリア
+      cleanupPendingTranscription();
+    } else if (retryCount >= maxRetries) {
+      // 最大試行回数に達した場合
+      logInfo("最大試行回数に達しました。最新の状態で処理を実行します");
+      useSlackTranscription(file, channelId, timestamp);
+      
+      // 保存データをクリア
+      cleanupPendingTranscription();
+    } else {
+      // まだ処理中の場合は再度スケジュール
+      PropertiesService.getScriptProperties().setProperty(
+        'PENDING_TRANSCRIPTION', 
+        JSON.stringify({
+          ...pendingData,
+          retryCount: retryCount + 1
+        })
+      );
+      
+      // 次の再試行をスケジュール
+      ScriptApp.newTrigger('retryTranscriptionCheck')
+        .timeBased()
+        .after(10000) // 10秒後
+        .create();
+    }
+  } catch (error) {
+    logError(`再試行処理エラー: ${JSON.stringify(error)}`);
+    cleanupPendingTranscription();
+  }
+}
+
+/**
+ * 保留中のトランスクリプション情報をクリアする
+ */
+function cleanupPendingTranscription(): void {
+  PropertiesService.getScriptProperties().deleteProperty('PENDING_TRANSCRIPTION');
+  
+  // 未使用のトリガーを全て削除
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'retryTranscriptionCheck') {
+      ScriptApp.deleteTrigger(trigger);
+    }
   }
 }
 
@@ -466,18 +565,9 @@ function postTranscription(channelId: string, text: string): boolean {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": `*📝 ボイスメモの文字起こし:*\n${formattedText}`
+        "text": `:terashi: ${formattedText}`
       }
     },
-    {
-      "type": "context",
-      "elements": [
-        {
-          "type": "mrkdwn",
-          "text": "Slack Voice Converterにより自動文字起こし"
-        }
-      ]
-    }
   ];
 
   const payload = {
