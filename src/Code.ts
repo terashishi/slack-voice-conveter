@@ -555,34 +555,25 @@ function postTranscription(channelId: string, text: string): boolean {
   logInfo(`🔍 文字起こし結果を投稿します: チャンネル=${channelId}`);
 
   const SLACK_CONFIG = getSlackConfig();
+  
+  // ユーザートークンを使用（ボットトークンではなく）
+  const token = SLACK_CONFIG.userToken; 
 
   const url = 'https://slack.com/api/chat.postMessage';
   
-  // 投稿するテキストを整形（リッチテキスト形式）
-  const formattedText = text.trim() || "文字起こしできる内容がありませんでした。";
+  // 投稿するテキストを整形
+  const formattedText = text.trim() || ":speech_balloon::arrow_right: :memo: … :x:";
   
-  // リッチな表示のためのブロックを作成
-  const blocks = [
-    {
-      "type": "section",
-      "text": {
-        "type": "mrkdwn",
-        "text": `:terashi: ${formattedText}`
-      }
-    },
-  ];
-
   const payload = {
     channel: channelId,
-    text: `📝 ボイスメモの文字起こし: ${formattedText}`, // ブロックがない場合のフォールバック
-    blocks: blocks,
-    mrkdwn: true,
+    text: formattedText, 
+    as_user: true,  // 重要: これを追加してユーザーとして投稿
   };
 
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'post',
     headers: {
-      Authorization: `Bearer ${SLACK_CONFIG.token}`,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     payload: JSON.stringify(payload),
