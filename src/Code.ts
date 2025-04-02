@@ -8,15 +8,45 @@ interface SlackConfig {
   channelName: string;
 }
 
-// Slackの設定
-const SLACK_CONFIG: SlackConfig = {
-  token: 'xoxb-your-bot-token-here',  // ボットトークン
-  userToken: 'xoxp-your-user-token-here',  // ユーザートークン
-  channelName: 'times-your-channel-name'  // 自分専用のtimesチャンネル名
-};
+/**
+ * 初期設定用の関数 - 初回のみ実行する
+ * この関数は手動で一度だけ実行し、トークンを安全に保存します
+ */
+function setupCredentials(): void {
+  // 実際のトークンと設定を入力
+  const botToken = 'xoxb-your-bot-token-here';  // ボットトークン
+  const userToken = 'xoxp-your-user-token-here'; // ユーザートークン
+  const channelName = 'times-your-channel-name'; // 自分専用のtimesチャンネル名
+  
+  // スクリプトプロパティに保存
+  const scriptProperties = PropertiesService.getScriptProperties();
+  scriptProperties.setProperty('SLACK_BOT_TOKEN', botToken);
+  scriptProperties.setProperty('SLACK_USER_TOKEN', userToken);
+  scriptProperties.setProperty('SLACK_CHANNEL_NAME', channelName);
+  
+  console.log('認証情報を安全に保存しました。');
+}
 
-// Google Cloud Speech-to-Text APIの設定（必要な場合）
-// const SPEECH_API_KEY = 'your-google-cloud-api-key';
+/**
+ * 設定を取得する関数
+ */
+function getSlackConfig(): SlackConfig {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  
+  const token = scriptProperties.getProperty('SLACK_BOT_TOKEN');
+  const userToken = scriptProperties.getProperty('SLACK_USER_TOKEN');
+  const channelName = scriptProperties.getProperty('SLACK_CHANNEL_NAME');
+  
+  if (!token || !userToken || !channelName) {
+    throw new Error('Slack設定が見つかりません。setupCredentials()関数を実行して設定を保存してください。');
+  }
+  
+  return {
+    token,
+    userToken,
+    channelName
+  };
+}
 
 // Slackからのイベントを処理するためのWebアプリケーション
 function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
@@ -31,35 +61,43 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
   if (data.event && data.event.type === 'message' && data.event.subtype === 'file_share') {
     const event = data.event;
     
-    // チャンネル名が設定したものと一致するか確認
-    const channelInfo = getChannelInfo(event.channel);
-    if (channelInfo.name !== SLACK_CONFIG.channelName) {
-      return ContentService.createTextOutput('Channel not matched');
-    }
-    
-    // ファイルがボイスメモかどうか確認
-    if (event.files && event.files.length > 0) {
-      const file = event.files[0];
-      if (file.mimetype && file.mimetype.startsWith('audio/')) {
-        // 処理を非同期で実行するためにトリガーを設定
-        const triggerData = {
-          fileId: file.id,
-          fileUrl: file.url_private,
-          channelId: event.channel,
-          timestamp: event.ts
-        };
-        
-        const triggerString = JSON.stringify(triggerData);
-        
-        // スクリプトプロパティに一時的にデータを保存
-        PropertiesService.getScriptProperties().setProperty('lastVoiceMemo', triggerString);
-        
-        // 1秒後に実行するトリガーを設定
-        ScriptApp.newTrigger('processVoiceMemo')
-          .timeBased()
-          .after(1000)
-          .create();
+    try {
+      // Slack設定を取得
+      const SLACK_CONFIG = getSlackConfig();
+      
+      // チャンネル名が設定したものと一致するか確認
+      const channelInfo = getChannelInfo(event.channel);
+      if (channelInfo.name !== SLACK_CONFIG.channelName) {
+        return ContentService.createTextOutput('Channel not matched');
       }
+      
+      // ファイルがボイスメモかどうか確認
+      if (event.files && event.files.length > 0) {
+        const file = event.files[0];
+        if (file.mimetype && file.mimetype.startsWith('audio/')) {
+          // 処理を非同期で実行するためにトリガーを設定
+          const triggerData = {
+            fileId: file.id,
+            fileUrl: file.url_private,
+            channelId: event.channel,
+            timestamp: event.ts
+          };
+          
+          const triggerString = JSON.stringify(triggerData);
+          
+          // スクリプトプロパティに一時的にデータを保存
+          PropertiesService.getScriptProperties().setProperty('lastVoiceMemo', triggerString);
+          PropertiesService.getScriptProperties().setProperty('lastChannelId', event.channel);
+          
+          // 1秒後に実行するトリガーを設定
+          ScriptApp.newTrigger('processVoiceMemo')
+            .timeBased()
+            .after(1000)
+            .create();
+        }
+      }
+    } catch (error) {
+      console.error('Error processing event:', error);
     }
   }
   
@@ -78,6 +116,9 @@ function processVoiceMemo(): void {
     
     const triggerData = JSON.parse(triggerString);
     const { fileId, fileUrl, channelId, timestamp } = triggerData;
+    
+    // Slack設定を取得
+    const SLACK_CONFIG = getSlackConfig();
     
     // 音声ファイルをダウンロード
     const audioBlob = downloadFile(fileUrl);
@@ -105,6 +146,7 @@ function processVoiceMemo(): void {
   } finally {
     // 一時データを削除
     PropertiesService.getScriptProperties().deleteProperty('lastVoiceMemo');
+    PropertiesService.getScriptProperties().deleteProperty('lastChannelId');
     
     // トリガーを削除
     deleteTrigger('processVoiceMemo');
@@ -113,6 +155,8 @@ function processVoiceMemo(): void {
 
 // Slackのチャンネル情報を取得
 function getChannelInfo(channelId: string): any {
+  const SLACK_CONFIG = getSlackConfig();
+  
   const url = `https://slack.com/api/conversations.info?channel=${channelId}`;
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'get',
@@ -135,6 +179,8 @@ function getChannelInfo(channelId: string): any {
 
 // Slackからファイルをダウンロード
 function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
+  const SLACK_CONFIG = getSlackConfig();
+  
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'get',
     headers: {
@@ -197,6 +243,8 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
 
 // 文字起こし結果をSlackに投稿
 function postTranscription(channelId: string, text: string): void {
+  const SLACK_CONFIG = getSlackConfig();
+  
   const url = 'https://slack.com/api/chat.postMessage';
   const payload = {
     channel: channelId,
@@ -224,6 +272,8 @@ function postTranscription(channelId: string, text: string): void {
 
 // 通常のメッセージを投稿
 function postMessage(channelId: string, text: string): void {
+  const SLACK_CONFIG = getSlackConfig();
+  
   const url = 'https://slack.com/api/chat.postMessage';
   const payload = {
     channel: channelId,
@@ -245,6 +295,8 @@ function postMessage(channelId: string, text: string): void {
 
 // 元のボイスメモメッセージを削除
 function deleteOriginalMessage(channelId: string, timestamp: string): void {
+  const SLACK_CONFIG = getSlackConfig();
+  
   const url = 'https://slack.com/api/chat.delete';
   const payload = {
     channel: channelId,
@@ -281,11 +333,11 @@ function deleteTrigger(handlerName: string): void {
 
 // Slackイベント購読のためのURL検証エンドポイント
 function doGet(): GoogleAppsScript.Content.TextOutput {
-  return ContentService.createTextOutput('Slack Voice converter is running!');
+  return ContentService.createTextOutput('Slack Voice Converter is running!');
 }
 
 // GASをウェブアプリケーションとしてデプロイするための設定
 function setup(): void {
-  // スクリプトプロパティに設定を保存する場合はここに追加
   console.log('Setup completed. Deploy as web app to use with Slack Events API.');
+  console.log('Remember to run the setupCredentials() function to save your Slack tokens securely.');
 }
