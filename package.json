@@ -2,14 +2,13 @@
   "name": "slack-voice-converter",
   "version": "1.0.0",
   "description": "Slack voice memo converter using Google Apps Script",
-  "main": "build/Code.js",
+  "main": "dist/main.js",
   "scripts": {
-    "clean": "rm -rf src/*.js && rm -rf build/*",
-    "build": "npm run clean && tsc && cp src/appsscript.json build/",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "push": "npm run build && clasp push",
-    "deploy": "npm run push && clasp deploy",
-    "watch": "tsc --watch",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "deploy": "npm run push && clasp deploy"
   },
   "keywords": [
     "slack",
@@ -24,6 +23,8 @@
   "devDependencies": {
     "@google/clasp": "^3.0.3-alpha",
     "@types/google-apps-script": "^1.0.97",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vite": "^6.2.4",
+    "vite-plugin-singlefile": "^2.2.0"
   }
 }

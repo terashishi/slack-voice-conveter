@@ -1,14 +1,19 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "module": "None",
+    "module": "ESNext",
+    "moduleResolution": "node",
     "lib": ["ESNext"],
-    "esModuleInterop": true,
+    "outDir": "dist",
     "strict": true,
     "noImplicitAny": true,
-    "strictNullChecks": true,
-    "outDir": "build",
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "esModuleInterop": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "build"]
+  "include": ["src/**/*.ts"]
 }
