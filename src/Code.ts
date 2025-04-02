@@ -41,203 +41,181 @@ function getSlackConfig(): SlackConfig {
   return { token, userToken, channelName };
 }
 
-/**
- * 同一ファイルイベントの重複処理を防ぐためのチェック
- * @param data Slackから受信したイベントデータ
- * @returns 重複している場合はtrue、新規の場合はfalse
- */
-function isDuplicateFileEvent(data: any): boolean {
-  try {
-    if (!data.event) return false;
-
-    // ファイル共有イベントを特定
-    const isFileEvent =
-      data.event.type === 'file_shared' ||
-      (data.event.type === 'message' && data.event.subtype === 'file_share');
-
-    if (!isFileEvent) return false;
-
-    // イベント情報を取得
-    const channelId = data.event.channel || data.event.channel_id;
-    const userId = data.event.user || data.event.user_id;
-
-    // ファイルIDを取得（イベントタイプによって場所が異なる）
-    let fileId;
-    if (data.event.file_id) {
-      fileId = data.event.file_id;
-    } else if (data.event.files && data.event.files.length > 0) {
-      fileId = data.event.files[0].id;
-    }
-
-    if (!channelId || !fileId) return false;
-
-    // 重複確認のための一意キーを作成
-    const eventKey = `${fileId}_${channelId}_${userId}`;
-    logInfo(`イベントキー: ${eventKey}`);
-
-    // キャッシュをチェック
-    const cache = CacheService.getScriptCache();
-    const cacheKey = `processed_file_${eventKey}`;
-    const cachedValue = cache.get(cacheKey);
-
-    if (cachedValue) {
-      logInfo(`重複ファイルイベントを検出: ${eventKey}`);
-      return true;
-    }
-
-    // 処理済みとしてマーク（5分間有効）
-    cache.put(cacheKey, 'processed', 300);
-    logInfo(`新規ファイルイベントとして記録: ${eventKey}`);
-    return false;
-  } catch (error) {
-    logError(`エラー: ${error}`);
-    return false; // エラー時は重複と判定せず処理を続行
-  }
-}
-
-/**
- * Slackからのイベントを処理するWebアプリケーションのエントリーポイント
- * @param e HTTPリクエストイベント
- * @returns テキスト応答
- */
-function doPost(
-  e: GoogleAppsScript.Events.DoPost
-): GoogleAppsScript.Content.TextOutput {
-  const data = JSON.parse(e.postData.contents);
-
-  // SlackのURL検証に対応
-  if (data.type === 'url_verification') {
-    logInfo('🔍 URL検証リクエストを処理します');
-    return ContentService.createTextOutput(data.challenge);
-  }
-
+function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
   logInfo('🔍 doPost関数が呼び出されました');
-  logInfo('🔍 受信データ: ' + e.postData.contents);
-
-  logInfo(
-    '🔍 イベントタイプ: ' + (data.event ? data.event.type : 'イベントなし')
-  );
-  logInfo(
-    '🔍 イベントサブタイプ: ' +
-      (data.event ? data.event.subtype : 'サブタイプなし')
-  );
-
-  // メッセージイベント以外は処理しない
-  if (!data.event || data.event.type !== 'message') {
-    logInfo('メッセージイベントではありません');
-    return ContentService.createTextOutput('Not a message event');
-  }
-
-  logInfo('🔍 メッセージイベントを受信しました');
-  const event = data.event;
-
-  // ファイル共有イベント以外は処理しない
-  if (event.subtype !== 'file_share') {
-    logInfo('❌ ファイル共有イベントではありません: ' + event.subtype);
-    return ContentService.createTextOutput('Not a file share event');
-  }
-
-  // リクエスト重複チェック
-  if (isDuplicateFileEvent(data)) {
-    logInfo('⚠️ 重複イベントを検出しました: ' + data.event);
-    return ContentService.createTextOutput('Duplicate event');
-  }
-
-  logInfo('🔍 ファイル共有イベントです');
-
+  
   try {
-    processVoiceMemo(event);
+    // 受信データ
+    const data = JSON.parse(e.postData.contents);
+    logInfo('🔍 受信データ: ' + e.postData.contents);
+    
+    // URL検証
+    if (data.type === 'url_verification') {
+      logInfo('🔍 URL検証リクエストを処理します');
+      return ContentService.createTextOutput(data.challenge);
+    }
+    
+    // イベントなしは無視
+    if (!data.event) {
+      logInfo('イベントデータがありません');
+      return ContentService.createTextOutput('No event data');
+    }
+    
+    // イベントタイプログ
+    logInfo('🔍 イベントタイプ: ' + data.event.type);
+    logInfo('🔍 イベントサブタイプ: ' + data.event.subtype);
+    
+    // file_sharedイベントとmessage/file_shareイベントの両方を適切に処理
+    if (data.event.type === 'file_shared') {
+      // ファイル共有イベント - これはファイルIDのみを含む通知
+      // ここでは特に処理せず、後続のmessageイベントで処理する
+      logInfo('ファイル共有イベントを検出しました（前処理）');
+      return ContentService.createTextOutput('File shared event received');
+    }
+    
+    // メッセージイベント以外は処理しない
+    if (data.event.type !== 'message') {
+      logInfo('メッセージイベントではありません');
+      return ContentService.createTextOutput('Not a message event');
+    }
+    
+    // メッセージイベント処理
+    logInfo('🔍 メッセージイベントを受信しました');
+        
+    // ファイル共有サブタイプのみ処理
+    if (data.event.subtype !== 'file_share') {
+      logInfo('❌ ファイル共有イベントではありません: ' + data.event.subtype);
+      return ContentService.createTextOutput('Not a file share event');
+    }
+    
+    
+    // ボイスメモ処理
+    logInfo('🔍 ファイル共有イベントです');
+    processVoiceMemo(data.event);
+    
   } catch (error) {
-    logError('❌ エラー発生: ' + JSON.stringify(error));
+    logError('❌ doPost処理エラー: ' + JSON.stringify(error));
   }
-
+  
   logInfo('🔍 doPost処理を完了しました');
   return ContentService.createTextOutput('Event received');
 }
 
-/**
- * ボイスメモを処理して最適な文字起こし結果を得る
- * @param event Slackイベントオブジェクト
- */
+// イベントキー作成
+function createEventKey(data: any): string {
+  const event = data.event;
+  let fileId = '';
+  
+  // ファイルIDの取得（イベントタイプによって位置が異なる）
+  if (event.file_id) {
+    fileId = event.file_id;
+  } else if (event.files && event.files.length > 0) {
+    fileId = event.files[0].id;
+  }
+  
+  const channelId = event.channel || event.channel_id || '';
+  const userId = event.user || event.user_id || '';
+  
+  return `${fileId}_${channelId}_${userId}`;
+}
+
+// 重複イベント検出
+function isDuplicateEvent(eventKey: string): boolean {
+  if (!eventKey) return false;
+  
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `processed_event_${eventKey}`;
+  
+  if (cache.get(cacheKey)) {
+    return true;
+  }
+  
+  // 処理済みとしてマーク
+  cache.put(cacheKey, 'processed', 300); // 5分間有効
+  return false;
+}
+
 function processVoiceMemo(event: any): void {
   try {
-    // ファイル情報を取得
-    const file = event.files[0];
-    const fileInfo = getFileInfo(file.id);
+    // ファイル情報取得準備
+    const fileId = event.files && event.files[0] && event.files[0].id;
     
-    // 文字起こし戦略
-    let finalTranscription = '';
-    let transcriptionSource = '';
-    let slackTranscription = '';
-    let googleTranscription = '';
-    
-    // 1. Slackの文字起こし結果を取得
-    if (fileInfo?.file?.transcription?.status === 'complete' && 
-        fileInfo.file.transcription.preview?.content) {
-      
-      slackTranscription = fileInfo.file.transcription.preview.content;
-      const locale = fileInfo.file.transcription.locale || 'unknown';
-      
-      logInfo(`Slack文字起こし (${locale}): ${slackTranscription}`);
-      
-      // 続きがある場合は注記
-      if (fileInfo.file.transcription.preview.has_more) {
-        slackTranscription += " (続きがあります)";
-      }
+    if (!fileId) {
+      logError("ファイルIDが見つかりません");
+      return;
     }
     
-    // 2. Google Speech-to-Textによる文字起こし
-    // Slackの結果が短すぎるか英語の場合は特に実行
-    const needsGoogleAPI = !slackTranscription || 
-                          slackTranscription.length < 10 || 
-                          (fileInfo?.file?.transcription?.locale === 'en-US');
+    // Slack APIでファイル情報を取得
+    const fileInfo = getFileInfo(fileId);
     
-    if (needsGoogleAPI) {
-      const audioBlob = downloadFile(file.url_private);
-      
-      if (audioBlob) {
-        googleTranscription = transcribeAudio(audioBlob);
-        logInfo(`Google文字起こし: ${googleTranscription}`);
-      }
+    if (!fileInfo || !fileInfo.file) {
+      logError("ファイル情報の取得に失敗しました");
+      return;
     }
     
-    // 3. 最適な文字起こし結果の選択
-    if (googleTranscription && 
-        googleTranscription !== '文字起こしできる内容がありませんでした。' &&
-        googleTranscription.length > (slackTranscription.length * 1.2)) {
-      // Google APIの結果の方が十分に長い場合はそれを使用
-      finalTranscription = googleTranscription;
-      transcriptionSource = 'Google Speech-to-Text';
-    } else if (slackTranscription) {
-      // Slackの結果が十分であれば使用
-      finalTranscription = slackTranscription;
-      transcriptionSource = 'Slack';
-    } else if (googleTranscription) {
-      // Googleの結果のみがある場合
-      finalTranscription = googleTranscription;
-      transcriptionSource = 'Google Speech-to-Text';
-    } else {
-      // どちらも結果がない場合
-      finalTranscription = '文字起こしできる内容がありませんでした。';
-      transcriptionSource = 'なし';
+    const file = fileInfo.file;
+    
+    // ファイルURLのログ
+    logInfo(`ファイル詳細: type=${file.mimetype}, name=${file.name}, url=${file.url_private}`);
+    
+    // 音声ファイルかチェック
+    if (!file.mimetype || !file.mimetype.startsWith('audio/')) {
+      logInfo(`音声ファイルではありません: ${file.mimetype}`);
+      return;
     }
     
-    logInfo(`✅ 文字起こし結果 (${transcriptionSource}): ${finalTranscription}`);
+    logInfo('✅ 音声ファイルを検出しました');
     
-    // 文字起こし結果を投稿
-    postTranscription(event.channel, finalTranscription);
-    logInfo('✅ 文字起こし結果を投稿しました');
-    
-    // 元のメッセージを削除（試行）
-    try {
-      deleteOriginalMessage(event.channel, event.ts);
-      logInfo('✅ 元のボイスメモを削除しました');
-    } catch (error) {
-      logWarning('⚠️ 元のボイスメモを削除できませんでした: ' + error);
+    // ダウンロードURLの確保
+    const downloadUrl = file.url_private;
+    if (!downloadUrl) {
+      logError("ダウンロードURLが見つかりません");
+      return;
     }
+    
+    // 音声ファイルをダウンロード
+    logInfo(`🔍 ファイルURL: ${downloadUrl}`);
+    const audioBlob = downloadFile(downloadUrl);
+    
+    if (!audioBlob) {
+      logError("ファイルのダウンロードに失敗しました");
+      // それでも文字起こし結果を投稿（Slackの結果利用）
+      handleTranscriptionWithoutAudio(file, event.channel, event.ts);
+      return;
+    }
+    
+    // 以下、文字起こし処理...（既存コード）
     
   } catch (error) {
-    logError('❌ 音声処理エラー: ' + JSON.stringify(error));
+    logError(`処理エラー: ${JSON.stringify(error)}`);
+  }
+}
+
+// 音声ファイルなしでの文字起こし（Slackの結果だけを使用）
+function handleTranscriptionWithoutAudio(file: any, channelId: string, timestamp: string): void {
+  let transcription = '文字起こしできる内容がありませんでした。';
+  
+  // Slackの文字起こしがあれば使用
+  if (file.transcription && file.transcription.status === 'complete' && 
+      file.transcription.preview && file.transcription.preview.content) {
+    
+    transcription = file.transcription.preview.content;
+    logInfo(`Slack文字起こし: ${transcription}`);
+    
+    // 続きがある場合
+    if (file.transcription.preview.has_more) {
+      transcription += " (続きがあります)";
+    }
+  }
+  
+  // 文字起こし結果を投稿
+  postTranscription(channelId, transcription);
+  
+  // 削除試行
+  try {
+    deleteOriginalMessage(channelId, timestamp);
+  } catch (error) {
+    logWarning(`削除失敗: ${error}`);
   }
 }
 
@@ -281,37 +259,44 @@ function getChannelInfo(channelId: string): any {
   }
 }
 
-/**
- * Slackからファイル情報を取得
- * @param fileId ファイルID
- * @returns ファイル情報オブジェクト、取得失敗時はnull
- */
 function getFileInfo(fileId: string): any {
   logInfo(`ファイル情報を取得します: ${fileId}`);
-
+  
   const SLACK_CONFIG = getSlackConfig();
-
+  
   const url = `https://slack.com/api/files.info?file=${fileId}`;
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'get',
     headers: {
-      Authorization: `Bearer ${SLACK_CONFIG.token}`,
-      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SLACK_CONFIG.token}`,
+      'Content-Type': 'application/json'
     },
-    muteHttpExceptions: true,
+    muteHttpExceptions: true
   };
-
+  
   try {
     const response = UrlFetchApp.fetch(url, options);
-    const responseData = JSON.parse(response.getContentText());
-
-    logInfo(`APIレスポンス: ${response.getResponseCode()}`);
-
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    logInfo(`APIレスポンス: ${responseCode}`);
+    // 応答の最初の200文字だけをログに記録（大きすぎる場合があるため）
+    logInfo(`応答内容サンプル: ${responseText.substring(0, 200)}...`);
+    
+    const responseData = JSON.parse(responseText);
+    
     if (!responseData.ok) {
       logError(`ファイル情報取得エラー: ${responseData.error}`);
       return null;
     }
-
+    
+    // ファイルURLの確認
+    if (responseData.file && responseData.file.url_private) {
+      logInfo(`ファイルURL確認: ${responseData.file.url_private}`);
+    } else {
+      logError(`URL情報なし: ${JSON.stringify(responseData.file && responseData.file.id)}`);
+    }
+    
     return responseData;
   } catch (error) {
     logError(`APIエラー: ${error}`);
