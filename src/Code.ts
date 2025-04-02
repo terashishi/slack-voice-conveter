@@ -27,9 +27,13 @@ function setupCredentials(): void {
   console.log('認証情報を安全に保存しました。');
 }
 
-function setupSpeechToTextAPI() {
+/**
+ * Google Cloud Speech-to-Text API のキーを設定する関数
+ */
+function setupSpeechToTextAPI(): void {
   const apiKey = JSON.stringify({
-    // ダウンロードしたJSONキーファイルの内容をここに貼り付け
+    // ここにGoogle Cloud サービスアカウントのJSONキーを貼り付ける
+    // 例: {"type": "service_account", "project_id": "your-project", ...}
   });
   
   PropertiesService.getScriptProperties().setProperty('GOOGLE_CLOUD_API_KEY', apiKey);
@@ -57,116 +61,153 @@ function getSlackConfig(): SlackConfig {
   };
 }
 
+/**
+ * イベントが既に処理済みかどうかをチェック
+ * @param eventId イベントID
+ * @return 処理済みならtrue、未処理ならfalse
+ */
+function isEventProcessed(eventId: string): boolean {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `processed_event_${eventId}`;
+  
+  // キャッシュに保存されているかチェック
+  const cachedValue = cache.get(cacheKey);
+  return cachedValue !== null;
+}
+
+/**
+ * イベントを処理済みとしてマーク
+ * @param eventId イベントID
+ * @param expirationSeconds キャッシュの有効期間（秒）
+ */
+function markEventAsProcessed(eventId: string, expirationSeconds: number = 3600): void {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `processed_event_${eventId}`;
+  
+  // キャッシュに保存（デフォルトでは1時間）
+  cache.put(cacheKey, 'processed', expirationSeconds);
+}
+
 // Slackからのイベントを処理するためのWebアプリケーション
 function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.TextOutput {
+  // デバッグログ
+  console.log('🔍 doPost関数が呼び出されました');
+  console.log('🔍 受信データ: ' + e.postData.contents);
+  
   const data = JSON.parse(e.postData.contents);
   
   // SlackのURL検証に対応
   if (data.type === 'url_verification') {
+    console.log('🔍 URL検証リクエストを処理します');
     return ContentService.createTextOutput(data.challenge);
   }
   
+  // イベントIDを取得
+  const eventId = data.event_id;
+  console.log('🔍 イベントID: ' + eventId);
+  
+  // 重複イベントチェック
+  if (eventId && isEventProcessed(eventId)) {
+    console.log('⚠️ 重複イベントを検出しました: ' + eventId);
+    return ContentService.createTextOutput('Duplicate event');
+  }
+  
+  // デバッグログ: データ構造の確認
+  console.log('🔍 イベントタイプ: ' + (data.event ? data.event.type : 'イベントなし'));
+  console.log('🔍 イベントサブタイプ: ' + (data.event ? data.event.subtype : 'サブタイプなし'));
+  
   // イベントがメッセージ追加で、ボイスメモの場合のみ処理
-  if (data.event && data.event.type === 'message' && data.event.subtype === 'file_share') {
+  if (data.event && data.event.type === 'message') {
+    console.log('🔍 メッセージイベントを受信しました');
+    
     const event = data.event;
     
-    try {
-      // Slack設定を取得
-      const SLACK_CONFIG = getSlackConfig();
+    // ファイル共有イベントの確認
+    if (event.subtype === 'file_share') {
+      console.log('🔍 ファイル共有イベントです');
       
-      // チャンネル名が設定したものと一致するか確認
-      const channelInfo = getChannelInfo(event.channel);
-      if (channelInfo.name !== SLACK_CONFIG.channelName) {
-        return ContentService.createTextOutput('Channel not matched');
-      }
-      
-      // ファイルがボイスメモかどうか確認
-      if (event.files && event.files.length > 0) {
-        const file = event.files[0];
-        if (file.mimetype && file.mimetype.startsWith('audio/')) {
-          // 処理を非同期で実行するためにトリガーを設定
-          const triggerData = {
-            fileId: file.id,
-            fileUrl: file.url_private,
-            channelId: event.channel,
-            timestamp: event.ts
-          };
-          
-          const triggerString = JSON.stringify(triggerData);
-          
-          // スクリプトプロパティに一時的にデータを保存
-          PropertiesService.getScriptProperties().setProperty('lastVoiceMemo', triggerString);
-          PropertiesService.getScriptProperties().setProperty('lastChannelId', event.channel);
-          
-          // 1秒後に実行するトリガーを設定
-          ScriptApp.newTrigger('processVoiceMemo')
-            .timeBased()
-            .after(1000)
-            .create();
+      try {
+        // Slack設定を取得
+        const SLACK_CONFIG = getSlackConfig();
+        console.log('🔍 Slack設定を取得しました: チャンネル名=' + SLACK_CONFIG.channelName);
+        
+        // チャンネルIDからチャンネル情報を取得
+        console.log('🔍 チャンネルID: ' + event.channel);
+        const channelInfo = getChannelInfo(event.channel);
+        console.log('🔍 チャンネル名: ' + channelInfo.name);
+        
+        // チャンネル名が設定したものと一致するか確認
+        if (channelInfo.name !== SLACK_CONFIG.channelName) {
+          console.log('❌ チャンネル名が一致しません: ' + channelInfo.name + ' != ' + SLACK_CONFIG.channelName);
+          return ContentService.createTextOutput('Channel not matched');
         }
+        
+        // ファイルの確認
+        if (event.files && event.files.length > 0) {
+          const file = event.files[0];
+          console.log('🔍 ファイルタイプ: ' + file.mimetype);
+          
+          // 音声ファイルの確認
+          if (file.mimetype && file.mimetype.startsWith('audio/')) {
+            console.log('✅ 音声ファイルを検出しました');
+            
+            // すぐに処理を実行
+            console.log('🔍 音声ファイルを処理します');
+            
+            // 音声ファイルをダウンロード
+            console.log('🔍 ファイルURL: ' + file.url_private);
+            const audioBlob = downloadFile(file.url_private);
+            
+            if (audioBlob) {
+              console.log('✅ ファイルのダウンロードに成功しました');
+              
+              // 音声を文字起こし (簡易版)
+              const transcription = transcribeAudio(audioBlob);
+              console.log('✅ 文字起こし結果: ' + transcription);
+              
+              // 文字起こし結果を投稿
+              postTranscription(event.channel, transcription);
+              console.log('✅ 文字起こし結果を投稿しました');
+              
+              // 元のボイスメモメッセージを削除
+              deleteOriginalMessage(event.channel, event.ts);
+              console.log('✅ 元のボイスメモを削除しました');
+              
+              // イベントを処理済みとしてマーク
+              if (eventId) {
+                markEventAsProcessed(eventId);
+                console.log('✅ イベントを処理済みとしてマークしました: ' + eventId);
+              }
+            } else {
+              console.log('❌ ファイルのダウンロードに失敗しました');
+            }
+          } else {
+            console.log('❌ 音声ファイルではありません: ' + file.mimetype);
+          }
+        } else {
+          console.log('❌ ファイルが添付されていません');
+        }
+      } catch (error) {
+        console.error('❌ エラー発生:', error);
       }
-    } catch (error) {
-      console.error('Error processing event:', error);
+    } else {
+      console.log('❌ ファイル共有イベントではありません: ' + event.subtype);
     }
   }
   
+  console.log('🔍 doPost処理を完了しました');
   return ContentService.createTextOutput('Event received');
-}
-
-// ボイスメモを処理する関数
-function processVoiceMemo(): void {
-  try {
-    // スクリプトプロパティから処理対象データを取得
-    const triggerString = PropertiesService.getScriptProperties().getProperty('lastVoiceMemo');
-    if (!triggerString) {
-      console.log('No voice memo data found');
-      return;
-    }
-    
-    const triggerData = JSON.parse(triggerString);
-    const { fileId, fileUrl, channelId, timestamp } = triggerData;
-    
-    // Slack設定を取得
-    const SLACK_CONFIG = getSlackConfig();
-    
-    // 音声ファイルをダウンロード
-    const audioBlob = downloadFile(fileUrl);
-    
-    if (audioBlob) {
-      // 音声を文字起こし
-      const transcription = transcribeAudio(audioBlob);
-      
-      if (transcription) {
-        // 文字起こし結果を投稿
-        postTranscription(channelId, transcription);
-        
-        // 元のボイスメモメッセージを削除
-        deleteOriginalMessage(channelId, timestamp);
-      }
-    }
-  } catch (error) {
-    console.error('Error processing voice memo:', error);
-    // エラーが発生した場合は通知
-    const errorMessage = error instanceof Error ? error.toString() : '不明なエラー';
-    const channelId = PropertiesService.getScriptProperties().getProperty('lastChannelId');
-    if (channelId) {
-      postMessage(channelId, `ボイスメモの処理中にエラーが発生しました: ${errorMessage}`);
-    }
-  } finally {
-    // 一時データを削除
-    PropertiesService.getScriptProperties().deleteProperty('lastVoiceMemo');
-    PropertiesService.getScriptProperties().deleteProperty('lastChannelId');
-    
-    // トリガーを削除
-    deleteTrigger('processVoiceMemo');
-  }
 }
 
 // Slackのチャンネル情報を取得
 function getChannelInfo(channelId: string): any {
+  console.log('🔍 getChannelInfo関数が呼び出されました: ' + channelId);
+  
   const SLACK_CONFIG = getSlackConfig();
   
   const url = `https://slack.com/api/conversations.info?channel=${channelId}`;
+  console.log('🔍 リクエストURL: ' + url);
+  
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'get',
     headers: {
@@ -176,18 +217,28 @@ function getChannelInfo(channelId: string): any {
     muteHttpExceptions: true
   };
   
-  const response = UrlFetchApp.fetch(url, options);
-  const responseData = JSON.parse(response.getContentText());
-  
-  if (!responseData.ok) {
-    throw new Error(`Failed to get channel info: ${responseData.error}`);
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseData = JSON.parse(response.getContentText());
+    
+    console.log('🔍 APIレスポンス: ' + response.getContentText());
+    
+    if (!responseData.ok) {
+      console.error('❌ チャンネル情報の取得に失敗: ' + responseData.error);
+      throw new Error(`Failed to get channel info: ${responseData.error}`);
+    }
+    
+    return responseData.channel;
+  } catch (error) {
+    console.error('❌ チャンネル情報取得エラー: ', error);
+    throw error;
   }
-  
-  return responseData.channel;
 }
 
 // Slackからファイルをダウンロード
 function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
+  console.log('🔍 downloadFile関数が呼び出されました: ' + fileUrl);
+  
   const SLACK_CONFIG = getSlackConfig();
   
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
@@ -200,18 +251,29 @@ function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
   
   try {
     const response = UrlFetchApp.fetch(fileUrl, options);
-    if (response.getResponseCode() === 200) {
+    const responseCode = response.getResponseCode();
+    console.log('🔍 ダウンロードレスポンスコード: ' + responseCode);
+    
+    if (responseCode === 200) {
       return response.getBlob();
+    } else {
+      console.error('❌ ファイルダウンロードエラー: ステータスコード ' + responseCode);
+      return null;
     }
   } catch (error) {
-    console.error('Error downloading file:', error);
+    console.error('❌ ファイルダウンロードエラー:', error);
+    return null;
   }
-  
-  return null;
 }
 
-// 音声を文字起こし
+// 音声を文字起こし (簡易版)
 function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
+  console.log('🔍 transcribeAudio関数が呼び出されました');
+  
+  // 開発中は固定テキストを返す
+  return testPostMessage();
+  
+  /* 本番コード (実装後にコメントを外す)
   try {
     // Google Cloud APIキーを取得
     const apiKeyJson = PropertiesService.getScriptProperties().getProperty('GOOGLE_CLOUD_API_KEY');
@@ -271,63 +333,13 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
     console.error('Transcription error:', error);
     return `音声の文字起こし中にエラーが発生しました: ${error instanceof Error ? error.message : '不明なエラー'}`;
   }
-}
-
-// Google Cloud APIの認証トークンを取得
-function getOAuthToken(apiKey: any): string {
-  try {
-    // サービスアカウント認証情報
-    const email = apiKey.client_email;
-    const key = apiKey.private_key;
-    
-    // JWT（JSON Web Token）のヘッダー
-    const header = {
-      alg: 'RS256',
-      typ: 'JWT'
-    };
-    
-    // 現在時刻（秒）
-    const now = Math.floor(Date.now() / 1000);
-    
-    // JWTのクレーム（ペイロード）
-    const claimSet = {
-      iss: email,
-      scope: 'https://www.googleapis.com/auth/cloud-platform',
-      aud: 'https://oauth2.googleapis.com/token',
-      exp: now + 3600,
-      iat: now
-    };
-    
-    // JWTのエンコード
-    const jwtHeader = Utilities.base64EncodeWebSafe(JSON.stringify(header));
-    const jwtClaimSet = Utilities.base64EncodeWebSafe(JSON.stringify(claimSet));
-    const jwtSignature = Utilities.computeRsaSha256Signature(
-      jwtHeader + '.' + jwtClaimSet,
-      key
-    );
-    const jwtSignatureEncoded = Utilities.base64EncodeWebSafe(jwtSignature);
-    const jwt = jwtHeader + '.' + jwtClaimSet + '.' + jwtSignatureEncoded;
-    
-    // OAuthトークンを取得
-    const response = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
-      method: 'post',
-      contentType: 'application/x-www-form-urlencoded',
-      payload: {
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: jwt
-      }
-    });
-    
-    const responseData = JSON.parse(response.getContentText());
-    return responseData.access_token;
-  } catch (error) {
-    console.error('OAuth token error:', error);
-    throw new Error('認証トークンの取得に失敗しました');
-  }
+  */
 }
 
 // 文字起こし結果をSlackに投稿
 function postTranscription(channelId: string, text: string): void {
+  console.log('🔍 postTranscription関数が呼び出されました: チャンネル=' + channelId);
+  
   const SLACK_CONFIG = getSlackConfig();
   
   const url = 'https://slack.com/api/chat.postMessage';
@@ -347,16 +359,26 @@ function postTranscription(channelId: string, text: string): void {
     muteHttpExceptions: true
   };
   
-  const response = UrlFetchApp.fetch(url, options);
-  const responseData = JSON.parse(response.getContentText());
-  
-  if (!responseData.ok) {
-    throw new Error(`Failed to post message: ${responseData.error}`);
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseData = JSON.parse(response.getContentText());
+    
+    console.log('🔍 メッセージ投稿レスポンス: ' + response.getContentText());
+    
+    if (!responseData.ok) {
+      console.error('❌ メッセージ投稿エラー: ' + responseData.error);
+      throw new Error(`Failed to post message: ${responseData.error}`);
+    }
+  } catch (error) {
+    console.error('❌ メッセージ投稿エラー:', error);
+    throw error;
   }
 }
 
 // 通常のメッセージを投稿
 function postMessage(channelId: string, text: string): void {
+  console.log('🔍 postMessage関数が呼び出されました: チャンネル=' + channelId);
+  
   const SLACK_CONFIG = getSlackConfig();
   
   const url = 'https://slack.com/api/chat.postMessage';
@@ -375,11 +397,18 @@ function postMessage(channelId: string, text: string): void {
     muteHttpExceptions: true
   };
   
-  UrlFetchApp.fetch(url, options);
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    console.log('🔍 メッセージ投稿レスポンス: ' + response.getContentText());
+  } catch (error) {
+    console.error('❌ 通常メッセージ投稿エラー:', error);
+  }
 }
 
 // 元のボイスメモメッセージを削除
 function deleteOriginalMessage(channelId: string, timestamp: string): void {
+  console.log('🔍 deleteOriginalMessage関数が呼び出されました: チャンネル=' + channelId + ', タイムスタンプ=' + timestamp);
+  
   const SLACK_CONFIG = getSlackConfig();
   
   const url = 'https://slack.com/api/chat.delete';
@@ -398,31 +427,65 @@ function deleteOriginalMessage(channelId: string, timestamp: string): void {
     muteHttpExceptions: true
   };
   
-  const response = UrlFetchApp.fetch(url, options);
-  const responseData = JSON.parse(response.getContentText());
-  
-  if (!responseData.ok) {
-    throw new Error(`Failed to delete message: ${responseData.error}`);
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseData = JSON.parse(response.getContentText());
+    
+    console.log('🔍 メッセージ削除レスポンス: ' + response.getContentText());
+    
+    if (!responseData.ok) {
+      console.error('❌ メッセージ削除エラー: ' + responseData.error);
+      throw new Error(`Failed to delete message: ${responseData.error}`);
+    }
+  } catch (error) {
+    console.error('❌ メッセージ削除エラー:', error);
+    throw error;
   }
 }
 
 // 特定の名前のトリガーを削除
 function deleteTrigger(handlerName: string): void {
+  console.log('🔍 deleteTrigger関数が呼び出されました: ' + handlerName);
+  
   const triggers = ScriptApp.getProjectTriggers();
   for (const trigger of triggers) {
     if (trigger.getHandlerFunction() === handlerName) {
       ScriptApp.deleteTrigger(trigger);
+      console.log('✅ トリガーを削除しました: ' + handlerName);
     }
   }
 }
 
 // Slackイベント購読のためのURL検証エンドポイント
 function doGet(): GoogleAppsScript.Content.TextOutput {
+  console.log('🔍 doGet関数が呼び出されました');
   return ContentService.createTextOutput('Slack Voice Converter is running!');
 }
 
 // GASをウェブアプリケーションとしてデプロイするための設定
 function setup(): void {
+  console.log('🔍 setup関数が呼び出されました');
   console.log('Setup completed. Deploy as web app to use with Slack Events API.');
   console.log('Remember to run the setupCredentials() function to save your Slack tokens securely.');
+}
+
+/**
+ * テスト用：特定のチャンネルにメッセージを送信するテスト
+ */
+function testPostMessage(): string {
+  // Slack設定を取得
+  const SLACK_CONFIG = getSlackConfig();
+  console.log('Slack設定: ', SLACK_CONFIG);
+      
+  // テストメッセージを送信
+  console.log("テストメッセージを送信します");
+  return "これはテストメッセージです。Slack Voice Converterからの送信テストです。";    
+}
+
+/**
+ * キャッシュをクリアする関数（デバッグ用）
+ */
+function clearEventCache(): void {
+  CacheService.getScriptCache().remove("processed_event_keys");
+  console.log("イベントキャッシュをクリアしました");
 }
