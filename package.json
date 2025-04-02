@@ -2,11 +2,21 @@
   "name": "slack-voice-conveter",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "build/Code.js",
   "scripts": {
+    "build": "tsc",
+    "push": "npm run build && clasp push",
+    "deploy": "npm run push && clasp deploy",
+    "watch": "tsc --watch",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "slack",
+    "voice",
+    "conveter",
+    "gas",
+    "google-apps-script"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
