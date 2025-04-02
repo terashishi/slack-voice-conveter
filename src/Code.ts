@@ -103,9 +103,6 @@ function isDuplicateFileEvent(data: any): boolean {
 function doPost(
   e: GoogleAppsScript.Events.DoPost
 ): GoogleAppsScript.Content.TextOutput {
-  logInfo('🔍 doPost関数が呼び出されました');
-  logInfo('🔍 受信データ: ' + e.postData.contents);
-
   const data = JSON.parse(e.postData.contents);
 
   // SlackのURL検証に対応
@@ -114,20 +111,8 @@ function doPost(
     return ContentService.createTextOutput(data.challenge);
   }
 
-  // チャンネルID + タイムスタンプで一意のIDを作成
-  if (!data.event || !data.event.channel || !data.event.ts) {
-    logInfo('イベントデータが不足しています');
-    return ContentService.createTextOutput('Invalid event data');
-  }
-
-  const eventId = data.event.channel + '_' + data.event.ts;
-  logInfo('🔍 代替イベントID作成: ' + eventId);
-
-  // 重複イベントチェック
-  if (isDuplicateFileEvent(data)) {
-    logInfo('⚠️ 重複イベントを検出しました: ' + eventId);
-    return ContentService.createTextOutput('Duplicate event');
-  }
+  logInfo('🔍 doPost関数が呼び出されました');
+  logInfo('🔍 受信データ: ' + e.postData.contents);
 
   logInfo(
     '🔍 イベントタイプ: ' + (data.event ? data.event.type : 'イベントなし')
@@ -150,6 +135,12 @@ function doPost(
   if (event.subtype !== 'file_share') {
     logInfo('❌ ファイル共有イベントではありません: ' + event.subtype);
     return ContentService.createTextOutput('Not a file share event');
+  }
+
+  // リクエスト重複チェック
+  if (isDuplicateFileEvent(data)) {
+    logInfo('⚠️ 重複イベントを検出しました: ' + data.event);
+    return ContentService.createTextOutput('Duplicate event');
   }
 
   logInfo('🔍 ファイル共有イベントです');
@@ -242,8 +233,15 @@ function processVoiceMemo(event: any): void {
   postTranscription(event.channel, transcription);
   logInfo('✅ 文字起こし結果を投稿しました');
 
-  // 元のボイスメモメッセージを削除
-  deleteOriginalMessage(event.channel, event.ts);
+  // 削除を試みるが、失敗してもエラーとしない
+  try {
+    deleteOriginalMessage(event.channel, event.ts);
+    logInfo('✅ 元のボイスメモを削除しました');
+  } catch (error) {
+    logWarning('⚠️ 元のボイスメモを削除できませんでした: ' + error);
+    // 処理は続行
+  }
+
   logInfo('✅ 元のボイスメモを削除しました');
 }
 
@@ -420,15 +418,18 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
     // Google Cloud Speech-to-Text APIリクエスト
     const requestData = {
       config: {
-        encoding: 'LINEAR16',
-        sampleRateHertz: 44100,
+        // encoding指定を削除し、APIに自動判定させる
+        sampleRateHertz: 16000, // モバイル録音に一般的なレート
         languageCode: 'ja-JP',
         model: 'default',
         enableAutomaticPunctuation: true,
+        // mp4/m4aに対応する設定を追加
+        audioChannelCount: 1,
+        useEnhanced: true // 拡張音声認識モデルを使用
       },
       audio: {
-        content: base64Audio,
-      },
+        content: base64Audio
+      }
     };
 
     const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
