@@ -27,6 +27,15 @@ function setupCredentials(): void {
   console.log('認証情報を安全に保存しました。');
 }
 
+function setupSpeechToTextAPI() {
+  const apiKey = JSON.stringify({
+    // ダウンロードしたJSONキーファイルの内容をここに貼り付け
+  });
+  
+  PropertiesService.getScriptProperties().setProperty('GOOGLE_CLOUD_API_KEY', apiKey);
+  console.log('Speech-to-Text API設定を保存しました。');
+}
+
 /**
  * 設定を取得する関数
  */
@@ -204,40 +213,116 @@ function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
 // 音声を文字起こし
 function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
   try {
-    // Google Speech-to-Text APIを使用する場合の実装
-    // 注意: この実装はGCP Speech-to-Text APIの設定が必要です
+    // Google Cloud APIキーを取得
+    const apiKeyJson = PropertiesService.getScriptProperties().getProperty('GOOGLE_CLOUD_API_KEY');
+    if (!apiKeyJson) {
+      throw new Error('Speech-to-Text API設定が見つかりません。setupSpeechToTextAPI()関数を実行してください。');
+    }
     
-    // Speech-to-Text APIがGASで直接使えない場合の代替手段:
-    // 1. 音声をDriveに一時保存し、
-    // 2. DocumentAppのvoice recognition機能を使うか、
-    // 3. 直接Speech-to-Text APIをリクエストする
-
-    // 簡単な例として、音声ファイルをGoogleドキュメントに埋め込み、DocumentAppのvoice recognition機能を使う方法
-    const docFile = DocumentApp.create('Voice Memo Transcription');
-    const doc = docFile.getBody();
-    doc.appendParagraph('Transcribing...');
+    // 音声をBase64にエンコード
+    const base64Audio = Utilities.base64Encode(audioBlob.getBytes());
     
-    // 音声をドキュメントに埋め込む（メタデータとして）
-    const file = DriveApp.createFile(audioBlob);
-    docFile.addEditor(Session.getEffectiveUser());
+    // Google Cloud Speech-to-Text APIリクエストの設定
+    const endpoint = 'https://speech.googleapis.com/v1/speech:recognize';
+    const apiKey = JSON.parse(apiKeyJson);
     
-    // 数秒待機してGoogleのバックグラウンド処理を待つ
-    Utilities.sleep(5000);
+    // リクエストデータ
+    const requestData = {
+      config: {
+        encoding: 'LINEAR16',
+        sampleRateHertz: 16000,
+        languageCode: 'ja-JP',  // 日本語を指定
+        model: 'default',
+        enableAutomaticPunctuation: true
+      },
+      audio: {
+        content: base64Audio
+      }
+    };
     
-    // ここでドキュメントから文字起こしを取得することは実際にはできません
-    // 実際の実装ではCloud Speech-to-Text APIを直接呼び出す必要があります
+    // OAuthトークンを取得
+    const token = getOAuthToken(apiKey);
     
-    // テスト用の仮の文字起こし結果
-    const transcription = "これはサンプルの文字起こし結果です。実際の実装では、Google Cloud Speech-to-Text APIを使用してください。";
+    // APIリクエスト
+    const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      payload: JSON.stringify(requestData),
+      muteHttpExceptions: true
+    };
     
-    // 一時ファイルを削除
-    DriveApp.getFileById(file.getId()).setTrashed(true);
-    DriveApp.getFileById(docFile.getId()).setTrashed(true);
+    const response = UrlFetchApp.fetch(endpoint, options);
+    const responseData = JSON.parse(response.getContentText());
     
-    return transcription;
+    // レスポンスから文字起こし結果を抽出
+    if (responseData.results && responseData.results.length > 0) {
+      let transcription = '';
+      for (const result of responseData.results) {
+        transcription += result.alternatives[0].transcript + ' ';
+      }
+      return transcription.trim();
+    } else {
+      return '文字起こしできる内容がありませんでした。';
+    }
   } catch (error) {
     console.error('Transcription error:', error);
-    return '音声の文字起こし中にエラーが発生しました。';
+    return `音声の文字起こし中にエラーが発生しました: ${error instanceof Error ? error.message : '不明なエラー'}`;
+  }
+}
+
+// Google Cloud APIの認証トークンを取得
+function getOAuthToken(apiKey: any): string {
+  try {
+    // サービスアカウント認証情報
+    const email = apiKey.client_email;
+    const key = apiKey.private_key;
+    
+    // JWT（JSON Web Token）のヘッダー
+    const header = {
+      alg: 'RS256',
+      typ: 'JWT'
+    };
+    
+    // 現在時刻（秒）
+    const now = Math.floor(Date.now() / 1000);
+    
+    // JWTのクレーム（ペイロード）
+    const claimSet = {
+      iss: email,
+      scope: 'https://www.googleapis.com/auth/cloud-platform',
+      aud: 'https://oauth2.googleapis.com/token',
+      exp: now + 3600,
+      iat: now
+    };
+    
+    // JWTのエンコード
+    const jwtHeader = Utilities.base64EncodeWebSafe(JSON.stringify(header));
+    const jwtClaimSet = Utilities.base64EncodeWebSafe(JSON.stringify(claimSet));
+    const jwtSignature = Utilities.computeRsaSha256Signature(
+      jwtHeader + '.' + jwtClaimSet,
+      key
+    );
+    const jwtSignatureEncoded = Utilities.base64EncodeWebSafe(jwtSignature);
+    const jwt = jwtHeader + '.' + jwtClaimSet + '.' + jwtSignatureEncoded;
+    
+    // OAuthトークンを取得
+    const response = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
+      method: 'post',
+      contentType: 'application/x-www-form-urlencoded',
+      payload: {
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt
+      }
+    });
+    
+    const responseData = JSON.parse(response.getContentText());
+    return responseData.access_token;
+  } catch (error) {
+    console.error('OAuth token error:', error);
+    throw new Error('認証トークンの取得に失敗しました');
   }
 }
 
