@@ -13,31 +13,6 @@ interface SlackConfig {
   channelName: string;
 }
 
-interface GcpMinimalServiceAccount {
-  private_key: string;
-  client_email: string;
-  client_id?: string;
-  project_id?: string;
-}
-
-/**
- * Speech-to-Text APIのレスポンス型を定義
- */
-interface SpeechToTextResponse {
-  results?: {
-    alternatives?: {
-      transcript?: string;
-      confidence?: number;
-    }[];
-  }[];
-  error?: {
-    code?: number;
-    message?: string;
-    status?: string;
-  };
-  totalBilledTime?: string;
-}
-
 /**
  * テスト用の模擬的なイベントを生成する関数
  */
@@ -208,11 +183,9 @@ function isDuplicateEvent(eventKey: string): boolean {
   cache.put(cacheKey, 'processed', 30); 
   return false;
 }
-
 /**
- * 改善されたファイル処理
- * - サムネイルURLではなく正規のダウンロードURLを使用
- * - ファイル情報取得を改善
+ * Slackのトランスクリプト機能を利用した音声メモ処理
+ * Google Cloud Speech-to-Text APIを使用せず、Slackのネイティブトランスクリプトを活用
  */
 function processVoiceMemo(event: any): void {
   try {
@@ -238,7 +211,6 @@ function processVoiceMemo(event: any): void {
     
     // ファイル情報のログ出力を詳細に
     logInfo(`ファイル詳細: id=${file.id}, type=${file.mimetype}, name=${file.name}`);
-    logInfo(`URL情報: 直接URL=${file.url_private}、ダウンロードURL=${file.url_private_download || "未定義"}`);
     
     // MIMEタイプでの音声ファイル確認（より広範なサポート）
     if (!file.mimetype || !(/^audio\/|^video\/|.*mp4$/.test(file.mimetype))) {
@@ -248,53 +220,142 @@ function processVoiceMemo(event: any): void {
     
     logInfo('✅ 音声ファイルを検出しました');
     
-    // ダウンロードURLの確保（ダウンロード専用URLがあればそれを、なければ直接URLを使用）
-    const downloadUrl = file.url_private_download || file.url_private;
-    if (!downloadUrl) {
-      logError("ダウンロードURLが見つかりません");
-      return;
-    }
+    // Slackのトランスクリプションを取得して処理
+    useSlackTranscription(file, event.channel, event.ts);
     
-    // 音声ファイルをダウンロード
-    logInfo(`🔍 ファイルダウンロード開始: ${downloadUrl}`);
-    const audioBlob = downloadFile(downloadUrl);
-    
-    if (!audioBlob) {
-      logError("ファイルのダウンロードに失敗しました");
-      // Slackの文字起こし結果があれば利用（フォールバック）
-      if (file.transcription && file.transcription.status === 'complete') {
-        handleTranscriptionWithoutAudio(file, event.channel, event.ts);
+  } catch (error) {
+    logError(`ボイスメモ処理エラー: ${JSON.stringify(error)}`);
+  }
+}
+
+/**
+ * Slackのトランスクリプション機能を使用
+ * @param file ファイル情報オブジェクト
+ * @param channelId チャンネルID
+ * @param timestamp タイムスタンプ
+ */
+function useSlackTranscription(file: any, channelId: string, timestamp: string): void {
+  logInfo('Slackのトランスクリプト機能を使用します');
+  let transcription = '文字起こしできる内容がありませんでした。';
+  
+  try {
+    // Slackのトランスクリプションチェック
+    if (file.transcription) {
+      logInfo(`Slackトランスクリプション状態: ${file.transcription.status}`);
+      
+      if (file.transcription.status === 'complete') {
+        // トランスクリプションが完了している場合
+        if (file.transcription.preview && file.transcription.preview.content) {
+          transcription = file.transcription.preview.content;
+          logInfo(`Slackトランスクリプト内容: ${transcription}`);
+          
+          // プレビューのみで一部の場合は完全版を取得
+          if (file.transcription.preview.has_more) {
+            logInfo('トランスクリプションの続きがあります。完全版を取得します。');
+            const fullTranscription = getFullTranscription(file.id);
+            
+            if (fullTranscription) {
+              transcription = fullTranscription;
+              logInfo(`完全版トランスクリプト取得成功: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
+            } else {
+              transcription += " (続きがあります)";
+              logInfo('完全版トランスクリプトの取得に失敗しました。プレビュー版を使用します。');
+            }
+          }
+        } else {
+          logInfo('トランスクリプションが完了していますが、内容が見つかりません');
+        }
+      } else if (file.transcription.status === 'processing') {
+        // まだ処理中の場合、待機してから再試行するオプション
+        logInfo('トランスクリプションは処理中です。しばらく待ってから再試行することをお勧めします。');
+        transcription = '音声の文字起こしは処理中です。しばらくしてから再度確認してください。';
+      } else if (file.transcription.status === 'failed') {
+        // 失敗した場合
+        logInfo('Slackのトランスクリプションが失敗しました。');
+        transcription = '音声の文字起こしに失敗しました。';
       } else {
-        logError("ファイルのダウンロードに失敗し、Slackの文字起こしも利用できません");
+        logInfo(`不明なトランスクリプション状態: ${file.transcription.status}`);
       }
-      return;
+    } else {
+      logInfo('このファイルにはトランスクリプション情報がありません。');
     }
-    
-    // 音声ファイルの情報をログ
-    logInfo(`音声ファイルサイズ: ${audioBlob.getBytes().length} バイト`);
-    
-    // ファイルのコンテンツタイプを確認
-    const contentType = audioBlob.getContentType();
-    logInfo(`音声ファイル形式: ${contentType}`);
-    
-    // 文字起こし処理
-    logInfo('文字起こし処理を開始します');
-    const transcriptionText = transcribeAudio(audioBlob);
-    logInfo(`文字起こし結果: ${transcriptionText.substring(0, 100)}${transcriptionText.length > 100 ? '...' : ''}`);
     
     // 文字起こし結果をSlackに投稿
-    postTranscription(event.channel, transcriptionText);
+    postTranscription(channelId, transcription);
     
-    // 元のメッセージを削除
+    // 元のメッセージを削除（オプション）
     try {
-      deleteOriginalMessage(event.channel, event.ts);
+      deleteOriginalMessage(channelId, timestamp);
       logInfo('元のメッセージを削除しました');
     } catch (error) {
       logWarning(`元メッセージの削除に失敗: ${error}`);
     }
     
   } catch (error) {
-    logError(`ボイスメモ処理エラー: ${JSON.stringify(error)}`);
+    logError(`Slackトランスクリプション処理エラー: ${error}`);
+    // エラーがあっても最低限の結果を投稿
+    postTranscription(channelId, transcription);
+  }
+}
+
+/**
+ * 完全版のトランスクリプションを取得（必要な場合）
+ * @param fileId ファイルID
+ * @returns 完全なトランスクリプションテキスト、または失敗時はnull
+ */
+function getFullTranscription(fileId: string): string | null {
+  logInfo(`ファイル ${fileId} の完全版トランスクリプションを取得します`);
+  
+  const SLACK_CONFIG = getSlackConfig();
+  
+  // Slack API files.info エンドポイントにトランスクリプションの全文を取得するパラメータを追加
+  const url = `https://slack.com/api/files.info?file=${fileId}&get_transcript=true`;
+  
+  const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+    method: 'get',
+    headers: {
+      'Authorization': `Bearer ${SLACK_CONFIG.token}`,
+      'Content-Type': 'application/json'
+    },
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseCode = response.getResponseCode();
+    
+    if (responseCode !== 200) {
+      logError(`完全版トランスクリプション取得エラー: ステータスコード ${responseCode}`);
+      return null;
+    }
+    
+    const responseData = JSON.parse(response.getContentText());
+    
+    if (!responseData.ok) {
+      logError(`API応答エラー: ${responseData.error}`);
+      return null;
+    }
+    
+    // 完全なトランスクリプションが含まれているか確認
+    if (responseData.file && 
+        responseData.file.transcription && 
+        responseData.file.transcription.full && 
+        responseData.file.transcription.full.content) {
+      return responseData.file.transcription.full.content;
+    } else if (responseData.file && 
+              responseData.file.transcription && 
+              responseData.file.transcription.preview && 
+              responseData.file.transcription.preview.content) {
+      // 完全版がなければプレビュー版を返す
+      return responseData.file.transcription.preview.content;
+    }
+    
+    logWarning('完全版トランスクリプションが応答に含まれていません');
+    return null;
+    
+  } catch (error) {
+    logError(`完全版トランスクリプション取得中のエラー: ${error}`);
+    return null;
   }
 }
 
@@ -344,42 +405,6 @@ function getFileInfo(fileId: string): any {
 }
 
 /**
- * 改善されたファイルダウンロード
- */
-function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
-  logInfo(`🔍 ファイルダウンロード開始: ${fileUrl}`);
-
-  const SLACK_CONFIG = getSlackConfig();
-
-  const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
-    method: 'get',
-    headers: {
-      Authorization: `Bearer ${SLACK_CONFIG.token}`,
-    },
-    muteHttpExceptions: true,
-  };
-
-  try {
-    logInfo('ダウンロードリクエスト送信中...');
-    const response = UrlFetchApp.fetch(fileUrl, options);
-    const responseCode = response.getResponseCode();
-    logInfo(`🔍 ダウンロードレスポンスコード: ${responseCode}`);
-
-    if (responseCode === 200) {
-      const blob = response.getBlob();
-      logInfo(`ダウンロード成功: ${blob.getName()}, サイズ: ${blob.getBytes().length} バイト`);
-      return blob;
-    } else {
-      logError(`❌ ファイルダウンロードエラー: ステータスコード ${responseCode}`);
-      return null;
-    }
-  } catch (error) {
-    logError(`❌ ファイルダウンロードエラー: ${JSON.stringify(error)}`);
-    return null;
-  }
-}
-
-/**
  * Slackのチャンネル情報を取得
  * @param channelId チャンネルID
  * @returns チャンネル情報オブジェクト
@@ -417,253 +442,6 @@ function getChannelInfo(channelId: string): any {
     logError('❌ チャンネル情報取得エラー: ' + JSON.stringify(error));
     throw error;
   }
-}
-
-/**
- * 改善された音声文字起こし - 認識問題の対応強化
- * @param audioBlob 音声データのBlobオブジェクト
- * @returns 文字起こしテキスト
- */
-function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
-  logInfo('🔍 文字起こし処理を開始します');
-  
-  try {
-    // Google Cloud APIキーを取得
-    const apiKeyJson = PropertiesService.getScriptProperties().getProperty('GOOGLE_CLOUD_API_KEY');
-    if (!apiKeyJson) {
-      throw new Error('Speech-to-Text API設定が見つかりません。setupSpeechToTextAPI()関数を実行してください。');
-    }
-    
-    // ファイル形式の確認とエンコード
-    const contentType = audioBlob.getContentType() as string;
-    logInfo(`ファイル形式: ${contentType}`);
-    
-    // サポートされる形式かチェック
-    const supportedFormats = ['audio/mp4', 'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-m4a', 'video/mp4'];
-    if (!supportedFormats.includes(contentType) && !contentType.includes('audio/')) {
-      logWarning(`非標準の音声形式: ${contentType} - 変換が必要かもしれません`);
-    }
-    
-    // バイナリデータ取得とBase64エンコード
-    const audioBytes = audioBlob.getBytes();
-    logInfo(`音声データサイズ: ${audioBytes.length} バイト`);
-    
-    if (audioBytes.length === 0) {
-      throw new Error('音声データが空です');
-    }
-    
-    const base64Audio = Utilities.base64Encode(audioBytes);
-    logInfo(`Base64エンコード完了: ${base64Audio.length} 文字`);
-    
-    // サービスアカウントキーをパース
-    let serviceAccount: GcpMinimalServiceAccount;
-    try {
-      serviceAccount = JSON.parse(apiKeyJson);
-      logInfo(`サービスアカウント: ${serviceAccount.client_email}`);
-    } catch (e) {
-      throw new Error(`サービスアカウント情報の解析に失敗: ${e}`);
-    }
-    
-    // JWTトークンを生成
-    logInfo('JWTトークン生成中...');
-    const jwt = generateJWT(serviceAccount);
-    
-    // アクセストークンを取得
-    logInfo('アクセストークン取得中...');
-    const tokenResponse = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
-      method: 'post',
-      payload: {
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: jwt
-      },
-      muteHttpExceptions: true
-    });
-    
-    const tokenResponseCode = tokenResponse.getResponseCode();
-    logInfo(`トークンレスポンスコード: ${tokenResponseCode}`);
-    
-    if (tokenResponseCode !== 200) {
-      throw new Error(`アクセストークン取得エラー: ${tokenResponse.getContentText()}`);
-    }
-    
-    const tokenData = JSON.parse(tokenResponse.getContentText());
-    if (!tokenData.access_token) {
-      throw new Error(`アクセストークンが返されませんでした: ${tokenResponse.getContentText()}`);
-    }
-    
-    const accessToken = tokenData.access_token;
-    logInfo('アクセストークン取得成功');
-    
-    // 言語設定の改善 - 日本語と英語の両方をサポート、主言語は日本語
-    // Slackボイスメモに最適化したGoogle Cloud Speech-to-Text APIリクエスト
-    const requestData = {
-      config: {
-        // 音声エンコーディングは自動検出に任せる
-        languageCode: 'ja-JP',
-        alternativeLanguageCodes: ['en-US'], // バイリンガル対応
-        
-        // 短時間音声に適したモデル
-        model: 'latest_short',
-        useEnhanced: true,
-        
-        // 認識精度向上のための設定
-        enableAutomaticPunctuation: true,
-        enableWordTimeOffsets: true,
-        profanityFilter: false,
-        maxAlternatives: 1,
-        
-        // 詳細設定
-        enableSpokenPunctuation: true,
-        enableSpokenEmojis: true,
-        
-        // 音声品質設定
-        audioChannelCount: 1,  // モノラル（ボイスメモ）
-        
-        // メタデータ
-        metadata: {
-          interactionType: 'DICTATION',
-          recordingDeviceType: 'SMARTPHONE',
-          microphoneDistance: 'NEARFIELD',
-          originalMediaType: 'AUDIO',
-          audioTopic: 'voice memo'
-        }
-      },
-      audio: {
-        content: base64Audio
-      }
-    };
-    
-    // リクエスト情報のログ（機密情報以外）
-    logInfo(`Speech APIリクエスト設定: 言語=${requestData.config.languageCode}, モデル=${requestData.config.model}`);
-    
-    const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
-      method: 'post',
-      contentType: 'application/json',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-      },
-      payload: JSON.stringify(requestData),
-      muteHttpExceptions: true
-    };
-    
-    // Speech-to-Text API呼び出し
-    logInfo('Google Speech-to-Text API呼び出し中...');
-    const response = UrlFetchApp.fetch('https://speech.googleapis.com/v1/speech:recognize', options);
-    
-    const responseCode = response.getResponseCode();
-    logInfo(`Speech API レスポンスコード: ${responseCode}`);
-    
-    if (responseCode !== 200) {
-      throw new Error(`Speech API エラー: ${response.getContentText()}`);
-    }
-    
-    const responseText = response.getContentText();
-    const responseData = JSON.parse(responseText) as SpeechToTextResponse;
-    
-    // 結果の処理
-    if (responseData.results && responseData.results.length > 0) {
-      // すべての結果を連結
-      const allTranscripts = responseData.results.map(result => {
-        if (result.alternatives && result.alternatives.length > 0) {
-          return result.alternatives[0].transcript || '';
-        }
-        return '';
-      }).filter(text => text.trim().length > 0);
-      
-      const transcription = allTranscripts.join(' ').trim();
-      
-      if (transcription) {
-        logInfo(`文字起こし成功: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
-        return transcription;
-      }
-    }
-    
-    // 結果がない場合は、Slackの内部文字起こしがあるかチェック
-    logWarning('Speech APIからの文字起こし結果が空でした');
-    return '文字起こしできる内容がありませんでした。';
-    
-  } catch (error) {
-    logError(`文字起こしエラー: ${error}`);
-    return `音声の文字起こし中にエラーが発生しました: ${error}`;
-  }
-}
-
-/**
- * 音声なしでの文字起こし（Slackの結果だけを使用）- 改善版
- */
-function handleTranscriptionWithoutAudio(file: any, channelId: string, timestamp: string): void {
-  logInfo('Slackの文字起こし結果を使用します');
-  let transcription = '文字起こしできる内容がありませんでした。';
-  
-  try {
-    // Slackの文字起こしがあれば使用
-    if (file.transcription) {
-      logInfo(`Slack文字起こし状態: ${file.transcription.status}`);
-      
-      if (file.transcription.status === 'complete' && 
-          file.transcription.preview && 
-          file.transcription.preview.content) {
-        
-        transcription = file.transcription.preview.content;
-        logInfo(`Slack文字起こし内容: ${transcription}`);
-        
-        // 続きがある場合
-        if (file.transcription.preview.has_more) {
-          transcription += " (続きがあります)";
-          
-          // 完全な文字起こしを取得するための追加APIコールも可能（オプション）
-          // この例では省略
-        }
-      }
-    } else {
-      logInfo('Slackの文字起こし情報がありません');
-    }
-    
-    // 文字起こし結果を投稿
-    postTranscription(channelId, transcription);
-    
-    // 元のメッセージを削除
-    deleteOriginalMessage(channelId, timestamp);
-    
-  } catch (error) {
-    logError(`Slack文字起こし処理エラー: ${error}`);
-    // エラーがあっても最低限の結果を投稿
-    postTranscription(channelId, transcription);
-  }
-}
-
-/**
- * JWTトークンを生成
- * @param serviceAccount サービスアカウント情報
- * @returns 生成されたJWTトークン
- */
-function generateJWT(serviceAccount: GcpMinimalServiceAccount): string {
-  const header = {
-    alg: 'RS256',
-    typ: 'JWT',
-  };
-
-  const now = Math.floor(Date.now() / 1000);
-  const claim = {
-    iss: serviceAccount.client_email,
-    sub: serviceAccount.client_email,
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
-    scope: 'https://www.googleapis.com/auth/cloud-platform',
-  };
-
-  const encodedHeader = Utilities.base64EncodeWebSafe(JSON.stringify(header));
-  const encodedClaim = Utilities.base64EncodeWebSafe(JSON.stringify(claim));
-
-  const signature = Utilities.computeRsaSha256Signature(
-    `${encodedHeader}.${encodedClaim}`,
-    serviceAccount.private_key
-  );
-
-  return `${encodedHeader}.${encodedClaim}.${Utilities.base64EncodeWebSafe(
-    signature
-  )}`;
 }
 
 /**
@@ -1074,45 +852,6 @@ function validateToken(token: string, tokenType: string): void {
 }
 
 /**
- * 改善されたGoogle Cloud Speech-to-Text API設定関数
- */
-function setupSpeechToTextAPI(apiKey?: string): void {
-  const scriptProperties = PropertiesService.getScriptProperties();
-  
-  // 既存の設定を取得
-  const existingApiKey = scriptProperties.getProperty('GOOGLE_CLOUD_API_KEY');
-  
-  // 新しい値または既存の値を使用
-  const newApiKey = apiKey || existingApiKey;
-  
-  if (!newApiKey) {
-    throw new Error('Google Cloud API Keyが指定されていません');
-  }
-  
-  try {
-    // APIキーが有効なJSONかチェック
-    const parsedKey = JSON.parse(newApiKey);
-    if (!parsedKey.private_key || !parsedKey.client_email) {
-      throw new Error('APIキーに必要なフィールド（private_key, client_email）が含まれていません');
-    }
-    
-    // APIキーを保存
-    scriptProperties.setProperty('GOOGLE_CLOUD_API_KEY', newApiKey);
-    
-    logInfo(`Google Cloud Speech-to-Text API設定を保存しました: client_email=${parsedKey.client_email}`);
-    
-    // サービスアカウントのプロジェクトIDを記録
-    if (parsedKey.project_id) {
-      logInfo(`プロジェクトID: ${parsedKey.project_id}`);
-    }
-    
-  } catch (error) {
-    logError(`APIキー設定エラー: ${error}`);
-    throw new Error('無効なGoogle Cloud APIキー形式です。サービスアカウントのJSONキーファイルの内容を使用してください。');
-  }
-}
-
-/**
  * アプリの全設定を確認する関数
  */
 function checkAllSettings(): void {
@@ -1127,10 +866,6 @@ function checkAllSettings(): void {
   const channelName = allProperties['SLACK_CHANNEL_NAME'];
   
   logInfo(`Slack設定: ボットトークン=${botToken ? '設定済み' : '未設定'}, ユーザートークン=${userToken ? '設定済み' : '未設定'}, チャンネル=${channelName || '未設定'}`);
-  
-  // Google Cloud API設定の確認
-  const apiKey = allProperties['GOOGLE_CLOUD_API_KEY'];
-  logInfo(`Google Cloud API: ${apiKey ? '設定済み' : '未設定'}`);
   
   // ログスプレッドシート設定の確認
   const spreadsheetId = allProperties[SPREADSHEET_ID_KEY];
