@@ -4,7 +4,7 @@
   "description": "",
   "main": "build/Code.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/appsscript.json build/",
     "push": "npm run build && clasp push",
     "deploy": "npm run push && clasp deploy",
     "watch": "tsc --watch",

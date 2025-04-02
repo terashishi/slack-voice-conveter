@@ -1,13 +1,14 @@
 {
   "compilerOptions": {
-    "target": "ES2019",
+    "target": "ES2024",
     "module": "None",
     "lib": ["ESNext"],
     "esModuleInterop": true,
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
-    "outDir": "build"
+    "outDir": "src"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
 }
