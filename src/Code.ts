@@ -43,29 +43,60 @@ function getSlackConfig(): SlackConfig {
 
 /**
  * イベントが既に処理済みかどうかをチェック
- * @param eventId イベントID
+ * @param data イベントタイプによって file_id の場所が異なる
  * @return 処理済みならtrue、未処理ならfalse
  */
-function isEventProcessed(eventId: string): boolean {
-  const cache = CacheService.getScriptCache();
-  const cacheKey = `processed_event_${eventId}`;
-  
-  // キャッシュに保存されているかチェック
-  const cachedValue = cache.get(cacheKey);
-  return cachedValue !== null;
-}
-
-/**
- * イベントを処理済みとしてマーク
- * @param eventId イベントID
- * @param expirationSeconds キャッシュの有効期間（秒）
- */
-function markEventAsProcessed(eventId: string, expirationSeconds: number = 3600): void {
-  const cache = CacheService.getScriptCache();
-  const cacheKey = `processed_event_${eventId}`;
-  
-  // キャッシュに保存（デフォルトでは1時間）
-  cache.put(cacheKey, 'processed', expirationSeconds);
+function isDuplicateFileEvent(data: any): boolean {
+  try {
+    if (!data.event) return false;
+    
+    // ファイル共有イベントを特定
+    const isFileEvent = 
+      (data.event.type === 'file_shared') || 
+      (data.event.type === 'message' && data.event.subtype === 'file_share');
+    
+    if (!isFileEvent) return false;
+    
+    // イベント情報を取得
+    const channelId = data.event.channel || data.event.channel_id;
+    const userId = data.event.user || data.event.user_id;
+    
+    // ファイルIDを取得（イベントタイプによって場所が異なる）
+    let fileId;
+    if (data.event.file_id) {
+      // file_sharedイベントの場合
+      fileId = data.event.file_id;
+    } else if (data.event.files && data.event.files.length > 0) {
+      // message.file_shareイベントの場合
+      fileId = data.event.files[0].id;
+    }
+    
+    if (!channelId || !fileId) return false;
+    
+    // 重複確認のための一意キーを作成
+    // ファイルID、チャンネルID、ユーザーIDの組み合わせ
+    const eventKey = `${fileId}_${channelId}_${userId}`;
+    logInfo(`イベントキー: ${eventKey}`);
+    
+    // キャッシュをチェック
+    const cache = CacheService.getScriptCache();
+    const cacheKey = `processed_file_${eventKey}`;
+    const cachedValue = cache.get(cacheKey);
+    
+    if (cachedValue) {
+      logInfo(`重複ファイルイベントを検出: ${eventKey}`);
+      return true;
+    }
+    
+    // 処理済みとしてマーク（5分間有効）
+    cache.put(cacheKey, 'processed', 300);
+    logInfo(`新規ファイルイベントとして記録: ${eventKey}`);
+    return false;
+    
+  } catch (error) {
+    logError(`エラー: ${error}`);
+    return false; // エラー時は重複と判定せず処理を続行
+  }
 }
 
 // Slackからのイベントを処理するためのWebアプリケーション
@@ -87,7 +118,7 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
     logInfo('🔍 代替イベントID作成:'  + eventId);
   
   // 重複イベントチェック
-  if (eventId && isEventProcessed(eventId)) {
+  if (eventId && isDuplicateFileEvent(data)) {
     logInfo('⚠️ 重複イベントを検出しました: ' + eventId);
     return ContentService.createTextOutput('Duplicate event');
   }
@@ -166,13 +197,7 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
               
               // 元のボイスメモメッセージを削除
               deleteOriginalMessage(event.channel, event.ts);
-              logInfo('✅ 元のボイスメモを削除しました');
-              
-              // イベントを処理済みとしてマーク
-              if (eventId) {
-                markEventAsProcessed(eventId);
-                logInfo('✅ イベントを処理済みとしてマークしました: ' + eventId);
-              }
+              logInfo('✅ 元のボイスメモを削除しました');              
             } else {
               logInfo('❌ ファイルのダウンロードに失敗しました');
             }
