@@ -683,13 +683,14 @@ function setupSpeechToTextAPI(): void {
  */
 
 // スプレッドシートIDを保存するためのキー
-const SPREADSHEET_ID_KEY = '1ri9NwlIg5oKrdN17Y0lpbOCBOAtlg2WVAvCiWYYAfqs';
+const SPREADSHEET_ID_KEY = 'SPREADSHEET_ID_KEY';
 
 /**
  * スプレッドシートIDを設定する関数
  * @param spreadsheetId スプレッドシートID
  */
-function setupLogSpreadsheet(spreadsheetId: string): void {
+function setupLogSpreadsheet(): void {
+  const spreadsheetId = "1ri9NwlIg5oKrdN17Y0lpbOCBOAtlg2WVAvCiWYYAfqs";
   PropertiesService.getScriptProperties().setProperty(SPREADSHEET_ID_KEY, spreadsheetId);
   
   // シートが存在するか確認し、なければ作成
@@ -793,5 +794,39 @@ function logObject(functionName: string, label: string, obj: any): void {
     logToSheet('DEBUG', `${label}: ${json}`);
   } catch (error) {
     logToSheet('ERROR', `${label}のシリアライズに失敗: ${error}`);
+  }
+}
+
+// Slackからファイル情報を取得する関数
+function debugSlackFileInfo(fileId: string): any {
+  logInfo(`ファイル情報を取得します: ${fileId}`);
+  
+  const SLACK_CONFIG = getSlackConfig();
+  
+  const url = `https://slack.com/api/files.info?file=${fileId}`;
+  const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+    method: 'get',
+    headers: {
+      'Authorization': `Bearer ${SLACK_CONFIG.token}`,
+      'Content-Type': 'application/json'
+    },
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseData = JSON.parse(response.getContentText());
+    
+    logInfo(`APIレスポンス: ${response.getResponseCode()}`);
+    
+    if (!responseData.ok) {
+      logError(`ファイル情報取得エラー: ${responseData.error}`);
+      return null;
+    }
+    
+    return responseData;
+  } catch (error) {
+    logError(`APIエラー: ${error}`);
+    return null;
   }
 }
