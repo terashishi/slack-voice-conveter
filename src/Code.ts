@@ -82,16 +82,9 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
     return ContentService.createTextOutput(data.challenge);
   }
   
-  // イベントIDを取得
-  let eventId = data.event_id;
-  logInfo('🔍 イベントID: ' + eventId);
-
-  // イベントIDがない場合は代替IDを作成
-  if (!eventId && data.event) {
-    // チャンネルID + タイムスタンプで一意のIDを作成
-    eventId = data.event.channel + '_' + data.event.ts;
+  // チャンネルID + タイムスタンプで一意のIDを作成
+  const eventId = data.event.channel + '_' + data.event.ts;
     logInfo('🔍 代替イベントID作成:'  + eventId);
-  }
   
   // 重複イベントチェック
   if (eventId && isEventProcessed(eventId)) {
