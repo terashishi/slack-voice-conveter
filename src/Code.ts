@@ -1,3 +1,8 @@
+/**
+ * @OnlyCurrentDoc
+ * @Logging(true)
+ */
+
 // Slack Voice Converter
 // スラックのボイスメモを文字起こしして再投稿し、元のボイスメモを削除するスクリプト
 
@@ -103,8 +108,15 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
   }
   
   // イベントIDを取得
-  const eventId = data.event_id;
+  let eventId = data.event_id;
   console.log('🔍 イベントID: ' + eventId);
+
+  // イベントIDがない場合は代替IDを作成
+  if (!eventId && data.event) {
+    // チャンネルID + タイムスタンプで一意のIDを作成
+    eventId = data.event.channel + '_' + data.event.ts;
+    console.log('🔍 代替イベントID作成:', eventId);
+  }
   
   // 重複イベントチェック
   if (eventId && isEventProcessed(eventId)) {
@@ -488,4 +500,93 @@ function testPostMessage(): string {
 function clearEventCache(): void {
   CacheService.getScriptCache().remove("processed_event_keys");
   console.log("イベントキャッシュをクリアしました");
+}
+
+/**
+ * console の挙動確認デバッグ関数
+ */
+function exampleLogging() {
+  // 通常のログ
+  console.log('通常のメッセージ');
+  
+  // 警告ログ
+  console.warn('警告メッセージ');
+  
+  // エラーログ
+  console.error('エラーメッセージ');
+}
+
+/**
+ * SlackUserToken を PropertyService に上書きするための関数
+ */
+function exchangeOAuthCode() {
+  const clientId = 'CLIEND_ID';
+  const clientSecret = 'CLIEND_SECRET';
+  const code = '2186695524.8679197372295.ae740a3fbda636ba991e455658f02cfe846acb18143591247603a6f9e17e2cdb';
+  const redirectUri = 'https://example.com';
+
+  const url = 'https://slack.com/api/oauth.v2.access';
+  const payload = {
+    client_id: clientId,
+    client_secret: clientSecret,
+    code: code,
+    redirect_uri: redirectUri
+  };
+
+  const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+    method: 'post',
+    payload: payload,
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const result = JSON.parse(response.getContentText());
+    
+    console.log('🔍 OAuth交換結果:', JSON.stringify(result, null, 2));
+    
+    // 必要に応じてトークンをスクリプトプロパティに保存
+    if (result.ok) {
+      const scriptProperties = PropertiesService.getScriptProperties();
+      scriptProperties.setProperty('SLACK_USER_TOKEN', result.authed_user.access_token);
+    }
+  } catch (error) {
+    console.error('❌ OAuth交換中にエラー:', error);
+  }
+}
+
+function checkSlackAppDetails() {
+  const SLACK_CONFIG = getSlackConfig();
+  
+  const teamInfoUrl = 'https://slack.com/api/team.info';
+  const authTestUrl = 'https://slack.com/api/auth.test';
+  
+  const teamInfoOptions :GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+    method: 'get',
+    headers: {
+      'Authorization': `Bearer ${SLACK_CONFIG.token}`
+    }
+  };
+  
+  const authTestOptions: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+    method: 'get',
+    headers: {
+      'Authorization': `Bearer ${SLACK_CONFIG.token}`
+    }
+  };
+  
+  try {
+    // チーム情報の取得
+    const teamInfoResponse = UrlFetchApp.fetch(teamInfoUrl, teamInfoOptions);
+    const teamInfoResult = JSON.parse(teamInfoResponse.getContentText());
+    console.log('🔍 チーム情報:', JSON.stringify(teamInfoResult, null, 2));
+    
+    // 認証テスト
+    const authTestResponse = UrlFetchApp.fetch(authTestUrl, authTestOptions);
+    const authTestResult = JSON.parse(authTestResponse.getContentText());
+    console.log('🔍 認証テスト結果:', JSON.stringify(authTestResult, null, 2));
+    
+  } catch (error) {
+    console.error('❌ Slack API確認中にエラー:', error);
+  }
 }
