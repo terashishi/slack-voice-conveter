@@ -13,36 +13,11 @@ interface SlackConfig {
   channelName: string;
 }
 
-/**
- * 初期設定用の関数 - 初回のみ実行する
- * この関数は手動で一度だけ実行し、トークンを安全に保存します
- */
-function setupCredentials(): void {
-  // 実際のトークンと設定を入力
-  const botToken = 'xoxb-your-bot-token-here';  // ボットトークン
-  const userToken = 'xoxp-your-user-token-here'; // ユーザートークン
-  const channelName = 'times-your-channel-name'; // 自分専用のtimesチャンネル名
-  
-  // スクリプトプロパティに保存
-  const scriptProperties = PropertiesService.getScriptProperties();
-  scriptProperties.setProperty('SLACK_BOT_TOKEN', botToken);
-  scriptProperties.setProperty('SLACK_USER_TOKEN', userToken);
-  scriptProperties.setProperty('SLACK_CHANNEL_NAME', channelName);
-  
-  console.log('認証情報を安全に保存しました。');
-}
-
-/**
- * Google Cloud Speech-to-Text API のキーを設定する関数
- */
-function setupSpeechToTextAPI(): void {
-  const apiKey = JSON.stringify({
-    // ここにGoogle Cloud サービスアカウントのJSONキーを貼り付ける
-    // 例: {"type": "service_account", "project_id": "your-project", ...}
-  });
-  
-  PropertiesService.getScriptProperties().setProperty('GOOGLE_CLOUD_API_KEY', apiKey);
-  console.log('Speech-to-Text API設定を保存しました。');
+interface GcpMinimalServiceAccount {
+  private_key: string;
+  client_email: string;
+  client_id?: string;
+  project_id?: string;
 }
 
 /**
@@ -278,14 +253,9 @@ function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
   }
 }
 
-// 音声を文字起こし (簡易版)
 function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
   console.log('🔍 transcribeAudio関数が呼び出されました');
   
-  // 開発中は固定テキストを返す
-  return testPostMessage();
-  
-  /* 本番コード (実装後にコメントを外す)
   try {
     // Google Cloud APIキーを取得
     const apiKeyJson = PropertiesService.getScriptProperties().getProperty('GOOGLE_CLOUD_API_KEY');
@@ -296,16 +266,68 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
     // 音声をBase64にエンコード
     const base64Audio = Utilities.base64Encode(audioBlob.getBytes());
     
-    // Google Cloud Speech-to-Text APIリクエストの設定
-    const endpoint = 'https://speech.googleapis.com/v1/speech:recognize';
-    const apiKey = JSON.parse(apiKeyJson);
+    // サービスアカウントキーをパース
+    const serviceAccount = JSON.parse(apiKeyJson) as GcpMinimalServiceAccount;
     
-    // リクエストデータ
+    // JWTを生成するための関数
+    function generateJWT(serviceAccount: GcpMinimalServiceAccount) {
+      const header = {
+        alg: 'RS256',
+        typ: 'JWT'
+      };
+      
+      const now = Math.floor(Date.now() / 1000);
+      const claim = {
+        iss: serviceAccount.client_email,
+        sub: serviceAccount.client_email,
+        aud: 'https://oauth2.googleapis.com/token',
+        iat: now,
+        exp: now + 3600,
+        scope: 'https://www.googleapis.com/auth/cloud-platform' // 重要: 適切なスコープを追加
+      };
+      
+      const encodedHeader = Utilities.base64EncodeWebSafe(JSON.stringify(header));
+      const encodedClaim = Utilities.base64EncodeWebSafe(JSON.stringify(claim));
+      
+      const signature = Utilities.computeRsaSha256Signature(
+        `${encodedHeader}.${encodedClaim}`, 
+        serviceAccount.private_key
+      );
+      
+      return `${encodedHeader}.${encodedClaim}.${Utilities.base64EncodeWebSafe(signature)}`;
+    }
+    
+    // JWTトークンを生成
+    const jwt = generateJWT(serviceAccount);
+    
+    // アクセストークンを取得するためのリクエスト
+    const tokenResponse = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
+      method: 'post',
+      payload: {
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt
+      },
+      muteHttpExceptions: true // エラーメッセージ全体を取得するために追加
+    });
+    
+    // トークン応答をログに記録
+    console.log('Token response code:', tokenResponse.getResponseCode());
+    console.log('Token response text:', tokenResponse.getContentText());
+    
+    const tokenData = JSON.parse(tokenResponse.getContentText());
+    
+    if (!tokenData.access_token) {
+      throw new Error('アクセストークンを取得できませんでした: ' + tokenResponse.getContentText());
+    }
+    
+    const accessToken = tokenData.access_token;
+    
+    // Google Cloud Speech-to-Text APIリクエスト
     const requestData = {
       config: {
         encoding: 'LINEAR16',
-        sampleRateHertz: 16000,
-        languageCode: 'ja-JP',  // 日本語を指定
+        sampleRateHertz: 44100, // 一般的な録音レートに変更
+        languageCode: 'ja-JP',
         model: 'default',
         enableAutomaticPunctuation: true
       },
@@ -314,21 +336,22 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
       }
     };
     
-    // OAuthトークンを取得
-    const token = getOAuthToken(apiKey);
-    
-    // APIリクエスト
     const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
       method: 'post',
       contentType: 'application/json',
       headers: {
-        'Authorization': `Bearer ${token}`
+        'Authorization': `Bearer ${accessToken}`
       },
       payload: JSON.stringify(requestData),
       muteHttpExceptions: true
     };
     
-    const response = UrlFetchApp.fetch(endpoint, options);
+    const response = UrlFetchApp.fetch('https://speech.googleapis.com/v1/speech:recognize', options);
+    
+    // APIレスポンスをログに記録
+    console.log('API response code:', response.getResponseCode());
+    console.log('API response text:', response.getContentText());
+    
     const responseData = JSON.parse(response.getContentText());
     
     // レスポンスから文字起こし結果を抽出
@@ -343,9 +366,8 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
     }
   } catch (error) {
     console.error('Transcription error:', error);
-    return `音声の文字起こし中にエラーが発生しました: ${error instanceof Error ? error.message : '不明なエラー'}`;
+    return `音声の文字起こし中にエラーが発生しました: ${error}`;
   }
-  */
 }
 
 // 文字起こし結果をSlackに投稿
@@ -589,4 +611,69 @@ function checkSlackAppDetails() {
   } catch (error) {
     console.error('❌ Slack API確認中にエラー:', error);
   }
+}
+
+/**
+ * SlackUserToken を PropertyService に上書きするための関数
+ */
+function debugSlackEvent() {
+  // テスト用のモックイベントを作成
+  const mockEvent = {
+    postData: {
+      contents: JSON.stringify({
+        type: 'event_callback',
+        event: {
+          type: 'message',
+          subtype: 'file_share',
+          channel: 'C0G498M27', // 実際のチャンネルID
+          files: [{
+            mimetype: 'audio/wav',
+            url_private: 'https://spookies.slack.com/files/U049SJHCF/F08KZ841GUX/audio_message.m4a'
+          }],
+          ts: '1234567890.123456'
+        }
+      })
+    }
+  }  as GoogleAppsScript.Events.DoPost;
+
+  // doPost関数を手動でテスト
+  console.log('🔍 デバッグ: モックイベントでテスト開始');
+  try {
+    doPost(mockEvent);
+  } catch (error) {
+    console.error('❌ デバッグ中にエラー:', error);
+  }
+}
+
+
+/**
+ * 初期設定用の関数 - 初回のみ実行する
+ * この関数は手動で一度だけ実行し、トークンを安全に保存します
+ */
+function setupCredentials(): void {
+  // 実際のトークンと設定を入力
+  const botToken = 'xoxb-your-bot-token-here';  // ボットトークン
+  const userToken = 'xoxp-your-user-token-here'; // ユーザートークン
+  const channelName = 'times-your-channel-name'; // 自分専用のtimesチャンネル名
+  
+  // スクリプトプロパティに保存
+  const scriptProperties = PropertiesService.getScriptProperties();
+  scriptProperties.setProperty('SLACK_BOT_TOKEN', botToken);
+  scriptProperties.setProperty('SLACK_USER_TOKEN', userToken);
+  scriptProperties.setProperty('SLACK_CHANNEL_NAME', channelName);
+  
+  console.log('認証情報を安全に保存しました。');
+}
+
+/**
+ * Google Cloud Speech-to-Text API のキーを設定する関数
+ */
+function setupSpeechToTextAPI(): void {
+  const apiKey = JSON.stringify({
+    // ここにGoogle Cloud サービスアカウントのJSONキーを貼り付ける
+    // 例: {"type": "service_account", "project_id": "your-project", ...}
+  });
+  
+  PropertiesService.getScriptProperties().setProperty('GOOGLE_CLOUD_API_KEY', apiKey);
+  console.log('Speech-to-Text API設定を保存しました。');
 }
