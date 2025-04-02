@@ -129,10 +129,25 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
           return ContentService.createTextOutput('Channel not matched');
         }
         
-        // ファイルの確認
+        // ファイル情報が不足している場合は追加で取得
         if (event.files && event.files.length > 0) {
           const file = event.files[0];
-          logInfo('🔍 ファイルタイプ: ' + file.mimetype);
+          
+          // ファイル情報が不足している場合は追加で取得
+          if (!file.url_private || file.file_access === "check_file_info") {
+            logInfo('🔍 ファイル情報を取得します: ' + file.id);
+            // Slack APIでファイル情報を取得
+            const fileInfo = getFileInfo(file.id);
+            logInfo('ファイル情報:' + JSON.stringify(fileInfo));
+            
+            // fileInfo.file が存在すればそれを使用
+            if (fileInfo && fileInfo.file) {
+              file.url_private = fileInfo.file.url_private;
+              file.mimetype = fileInfo.file.mimetype;
+            }
+          }
+          
+          logInfo(`🔍 ファイルタイプ: ${file.mimetype}, URL: ${file.url_private}`);
           
           // 音声ファイルの確認
           if (file.mimetype && file.mimetype.startsWith('audio/')) {
@@ -175,7 +190,7 @@ function doPost(e: GoogleAppsScript.Events.DoPost): GoogleAppsScript.Content.Tex
           logInfo('❌ ファイルが添付されていません');
         }
       } catch (error) {
-        console.error('❌ エラー発生:', error);
+        logError('❌ エラー発生:' + JSON.stringify(error));
       }
     } else {
       logInfo('❌ ファイル共有イベントではありません: ' + event.subtype);
@@ -211,13 +226,13 @@ function getChannelInfo(channelId: string): any {
     logInfo('🔍 APIレスポンス: ' + response.getContentText());
     
     if (!responseData.ok) {
-      console.error('❌ チャンネル情報の取得に失敗: ' + responseData.error);
+      logError('❌ チャンネル情報の取得に失敗: ' + responseData.error);
       throw new Error(`Failed to get channel info: ${responseData.error}`);
     }
     
     return responseData.channel;
   } catch (error) {
-    console.error('❌ チャンネル情報取得エラー: ', error);
+    logError('❌ チャンネル情報取得エラー: ' + JSON.stringify(error));
     throw error;
   }
 }
@@ -244,11 +259,11 @@ function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
     if (responseCode === 200) {
       return response.getBlob();
     } else {
-      console.error('❌ ファイルダウンロードエラー: ステータスコード ' + responseCode);
+      logError('❌ ファイルダウンロードエラー: ステータスコード ' + responseCode);
       return null;
     }
   } catch (error) {
-    console.error('❌ ファイルダウンロードエラー:', error);
+    logError('❌ ファイルダウンロードエラー:' + JSON.stringify(error));
     return null;
   }
 }
@@ -365,7 +380,7 @@ function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
       return '文字起こしできる内容がありませんでした。';
     }
   } catch (error) {
-    console.error('Transcription error:', error);
+    logError('Transcription error:' + JSON.stringify(error));
     return `音声の文字起こし中にエラーが発生しました: ${error}`;
   }
 }
@@ -400,11 +415,11 @@ function postTranscription(channelId: string, text: string): void {
     logInfo('🔍 メッセージ投稿レスポンス: ' + response.getContentText());
     
     if (!responseData.ok) {
-      console.error('❌ メッセージ投稿エラー: ' + responseData.error);
+      logError('❌ メッセージ投稿エラー: ' + responseData.error);
       throw new Error(`Failed to post message: ${responseData.error}`);
     }
   } catch (error) {
-    console.error('❌ メッセージ投稿エラー:', error);
+    logError('❌ メッセージ投稿エラー:' + JSON.stringify(error));
     throw error;
   }
 }
@@ -435,7 +450,7 @@ function postMessage(channelId: string, text: string): void {
     const response = UrlFetchApp.fetch(url, options);
     logInfo('🔍 メッセージ投稿レスポンス: ' + response.getContentText());
   } catch (error) {
-    console.error('❌ 通常メッセージ投稿エラー:', error);
+    logError('❌ 通常メッセージ投稿エラー:' + JSON.stringify(error));
   }
 }
 
@@ -468,11 +483,11 @@ function deleteOriginalMessage(channelId: string, timestamp: string): void {
     logInfo('🔍 メッセージ削除レスポンス: ' + response.getContentText());
     
     if (!responseData.ok) {
-      console.error('❌ メッセージ削除エラー: ' + responseData.error);
+      logError('❌ メッセージ削除エラー: ' + responseData.error);
       throw new Error(`Failed to delete message: ${responseData.error}`);
     }
   } catch (error) {
-    console.error('❌ メッセージ削除エラー:', error);
+    logError('❌ メッセージ削除エラー:' + JSON.stringify(error));
     throw error;
   }
 }
@@ -535,7 +550,7 @@ function exampleLogging() {
   console.warn('警告メッセージ');
   
   // エラーログ
-  console.error('エラーメッセージ');
+  logError('エラーメッセージ');
 }
 
 /**
@@ -573,7 +588,7 @@ function exchangeOAuthCode() {
       scriptProperties.setProperty('SLACK_USER_TOKEN', result.authed_user.access_token);
     }
   } catch (error) {
-    console.error('❌ OAuth交換中にエラー:', error);
+    logError('❌ OAuth交換中にエラー:' + JSON.stringify(error));
   }
 }
 
@@ -609,7 +624,7 @@ function checkSlackAppDetails() {
     logInfo('🔍 認証テスト結果:' + JSON.stringify(authTestResult, null, 2));
     
   } catch (error) {
-    console.error('❌ Slack API確認中にエラー:', error);
+    logError('❌ Slack API確認中にエラー:' + JSON.stringify(error));
   }
 }
 
@@ -641,7 +656,7 @@ function debugSlackEvent() {
   try {
     doPost(mockEvent);
   } catch (error) {
-    console.error('❌ デバッグ中にエラー:', error);
+    logError('❌ デバッグ中にエラー:' + JSON.stringify(error));
   }
 }
 
@@ -745,7 +760,7 @@ function logToSheet(level: string, message: string): void {
     }
   } catch (error) {
     // エラーが発生した場合は通常のログに出力
-    logInfo(`ログ出力エラー: ${error}`);
+    logError(`ログ出力エラー: ${error}`);
     logInfo(`元のメッセージ [${level}]: ${message}`);
   }
 }
@@ -757,14 +772,6 @@ function logToSheet(level: string, message: string): void {
  */
 function logInfo(message: string): void {
   logToSheet('INFO', message);
-}
-
-/**
- * DEBUG レベルのログを出力
- * @param message メッセージ
- */
-function logDebug(message: string): void {
-  logToSheet('DEBUG', message);
 }
 
 /**
@@ -783,22 +790,8 @@ function logError( message: string): void {
   logToSheet('ERROR',  message);
 }
 
-/**
- * 任意のオブジェクトを文字列にして出力（JSONとして整形）
- * @param label ラベル
- * @param obj オブジェクト
- */
-function logObject(functionName: string, label: string, obj: any): void {
-  try {
-    const json = JSON.stringify(obj, null, 2);
-    logToSheet('DEBUG', `${label}: ${json}`);
-  } catch (error) {
-    logToSheet('ERROR', `${label}のシリアライズに失敗: ${error}`);
-  }
-}
-
 // Slackからファイル情報を取得する関数
-function debugSlackFileInfo(fileId: string): any {
+function getFileInfo(fileId: string): any {
   logInfo(`ファイル情報を取得します: ${fileId}`);
   
   const SLACK_CONFIG = getSlackConfig();
