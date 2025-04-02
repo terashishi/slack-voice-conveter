@@ -67,7 +67,7 @@ clasp create --title "Slack Voice Converter" --type standalone
 
 ## プロジェクト構造
 
-正しいプロジェクト構造は以下のようになります：
+理想的なプロジェクト構造は以下のようになります：
 
 ```
 slack-voice-converter/
@@ -82,6 +82,8 @@ slack-voice-converter/
     ├── appsscript.json    // GASマニフェストファイル (元ファイル)
     └── Code.ts            // TypeScriptのソースコード
 ```
+
+注意: 現在のプロジェクト構造では `src/Code.js` が存在する場合がありますが、これはTypeScriptのコンパイル設定が `outDir` を正しく設定していない場合に発生します。このファイルは本来 `build/` ディレクトリに生成されるべきです。
 
 ### 重要なファイル
 
@@ -134,8 +136,8 @@ slack-voice-converter/
     "strictNullChecks": true,
     "outDir": "build"
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "build"]
 }
 ```
 
@@ -148,7 +150,8 @@ slack-voice-converter/
   "description": "Slack voice memo converter using Google Apps Script",
   "main": "build/Code.js",
   "scripts": {
-    "build": "tsc && cp src/appsscript.json build/",
+    "clean": "rm -rf src/*.js && rm -rf build/*",
+    "build": "npm run clean && tsc && cp src/appsscript.json build/",
     "push": "npm run build && clasp push",
     "deploy": "npm run push && clasp deploy",
     "watch": "tsc --watch",
@@ -249,9 +252,24 @@ const SLACK_CONFIG: SlackConfig = {
 解決策:
 - `tsconfig.json` の `include` パスが正しいことを確認:
   ```json
-  "include": ["src/**/*"]
+  "include": ["src/**/*.ts"]
   ```
 - ソースファイルが `src` ディレクトリに存在することを確認
+
+### JavaScriptファイルが src ディレクトリに生成される問題
+
+症状: TypeScriptコンパイル後に `src/Code.js` のようなJSファイルが `src` ディレクトリに生成される
+
+解決策:
+- `tsconfig.json` の `outDir` が `build` に設定されていることを確認
+- 以下のコマンドで一度クリーンアップしてからビルドを実行:
+  ```bash
+  npm run clean && npm run build
+  ```
+- `package.json` に次のようなクリーンアップスクリプトを追加:
+  ```json
+  "clean": "rm -rf src/*.js && rm -rf build/*"
+  ```
 
 ### claspのプッシュエラー
 

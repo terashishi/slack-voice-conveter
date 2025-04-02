@@ -1,10 +1,11 @@
 {
-  "name": "slack-voice-conveter",
+  "name": "slack-voice-converter",
   "version": "1.0.0",
-  "description": "",
+  "description": "Slack voice memo converter using Google Apps Script",
   "main": "build/Code.js",
   "scripts": {
-    "build": "tsc && cp src/appsscript.json build/",
+    "clean": "rm -rf src/*.js && rm -rf build/*",
+    "build": "npm run clean && tsc && cp src/appsscript.json build/",
     "push": "npm run build && clasp push",
     "deploy": "npm run push && clasp deploy",
     "watch": "tsc --watch",
@@ -13,13 +14,15 @@
   "keywords": [
     "slack",
     "voice",
-    "conveter",
+    "convert",
+    "transcribe",
     "gas",
     "google-apps-script"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
+    "@google/clasp": "^3.0.3-alpha",
     "@types/google-apps-script": "^1.0.97",
     "typescript": "^5.8.2"
   }

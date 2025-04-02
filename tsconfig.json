@@ -7,8 +7,8 @@
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
-    "outDir": "src"
+    "outDir": "build"
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "build"]
 }
