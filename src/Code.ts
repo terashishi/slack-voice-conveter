@@ -156,93 +156,89 @@ function doPost(
 }
 
 /**
- * ボイスメモ処理のメイン関数
+ * ボイスメモを処理して最適な文字起こし結果を得る
  * @param event Slackイベントオブジェクト
  */
 function processVoiceMemo(event: any): void {
-  // Slack設定を取得
-  const SLACK_CONFIG = getSlackConfig();
-  logInfo(
-    '🔍 Slack設定を取得しました: チャンネル名=' + SLACK_CONFIG.channelName
-  );
-
-  // チャンネル情報を取得
-  logInfo('🔍 チャンネルID: ' + event.channel);
-  const channelInfo = getChannelInfo(event.channel);
-  logInfo('🔍 チャンネル名: ' + channelInfo.name);
-
-  // チャンネル名が設定と一致しない場合は処理しない
-  if (channelInfo.name !== SLACK_CONFIG.channelName) {
-    logInfo(
-      '❌ チャンネル名が一致しません: ' +
-        channelInfo.name +
-        ' != ' +
-        SLACK_CONFIG.channelName
-    );
-    return;
-  }
-
-  // ファイルが添付されていない場合は処理しない
-  if (!event.files || event.files.length === 0) {
-    logInfo('❌ ファイルが添付されていません');
-    return;
-  }
-
-  const file = event.files[0];
-
-  // ファイル情報が不足している場合は追加で取得
-  if (!file.url_private || file.file_access === 'check_file_info') {
-    logInfo('🔍 ファイル情報を取得します: ' + file.id);
-    const fileInfo = getFileInfo(file.id);
-    logInfo('ファイル情報: ' + JSON.stringify(fileInfo));
-
-    // fileInfo.file が存在すればそれを使用
-    if (fileInfo && fileInfo.file) {
-      file.url_private = fileInfo.file.url_private;
-      file.mimetype = fileInfo.file.mimetype;
-    }
-  }
-
-  logInfo(`🔍 ファイルタイプ: ${file.mimetype}, URL: ${file.url_private}`);
-
-  // 音声ファイル以外は処理しない
-  if (!file.mimetype || !file.mimetype.startsWith('audio/')) {
-    logInfo('❌ 音声ファイルではありません: ' + file.mimetype);
-    return;
-  }
-
-  logInfo('✅ 音声ファイルを検出しました');
-  logInfo('🔍 音声ファイルを処理します');
-
-  // 音声ファイルをダウンロード
-  logInfo('🔍 ファイルURL: ' + file.url_private);
-  const audioBlob = downloadFile(file.url_private);
-
-  if (!audioBlob) {
-    logInfo('❌ ファイルのダウンロードに失敗しました');
-    return;
-  }
-
-  logInfo('✅ ファイルのダウンロードに成功しました');
-
-  // 音声を文字起こし
-  const transcription = transcribeAudio(audioBlob);
-  logInfo('✅ 文字起こし結果: ' + transcription);
-
-  // 文字起こし結果を投稿
-  postTranscription(event.channel, transcription);
-  logInfo('✅ 文字起こし結果を投稿しました');
-
-  // 削除を試みるが、失敗してもエラーとしない
   try {
-    deleteOriginalMessage(event.channel, event.ts);
-    logInfo('✅ 元のボイスメモを削除しました');
+    // ファイル情報を取得
+    const file = event.files[0];
+    const fileInfo = getFileInfo(file.id);
+    
+    // 文字起こし戦略
+    let finalTranscription = '';
+    let transcriptionSource = '';
+    let slackTranscription = '';
+    let googleTranscription = '';
+    
+    // 1. Slackの文字起こし結果を取得
+    if (fileInfo?.file?.transcription?.status === 'complete' && 
+        fileInfo.file.transcription.preview?.content) {
+      
+      slackTranscription = fileInfo.file.transcription.preview.content;
+      const locale = fileInfo.file.transcription.locale || 'unknown';
+      
+      logInfo(`Slack文字起こし (${locale}): ${slackTranscription}`);
+      
+      // 続きがある場合は注記
+      if (fileInfo.file.transcription.preview.has_more) {
+        slackTranscription += " (続きがあります)";
+      }
+    }
+    
+    // 2. Google Speech-to-Textによる文字起こし
+    // Slackの結果が短すぎるか英語の場合は特に実行
+    const needsGoogleAPI = !slackTranscription || 
+                          slackTranscription.length < 10 || 
+                          (fileInfo?.file?.transcription?.locale === 'en-US');
+    
+    if (needsGoogleAPI) {
+      const audioBlob = downloadFile(file.url_private);
+      
+      if (audioBlob) {
+        googleTranscription = transcribeAudio(audioBlob);
+        logInfo(`Google文字起こし: ${googleTranscription}`);
+      }
+    }
+    
+    // 3. 最適な文字起こし結果の選択
+    if (googleTranscription && 
+        googleTranscription !== '文字起こしできる内容がありませんでした。' &&
+        googleTranscription.length > (slackTranscription.length * 1.2)) {
+      // Google APIの結果の方が十分に長い場合はそれを使用
+      finalTranscription = googleTranscription;
+      transcriptionSource = 'Google Speech-to-Text';
+    } else if (slackTranscription) {
+      // Slackの結果が十分であれば使用
+      finalTranscription = slackTranscription;
+      transcriptionSource = 'Slack';
+    } else if (googleTranscription) {
+      // Googleの結果のみがある場合
+      finalTranscription = googleTranscription;
+      transcriptionSource = 'Google Speech-to-Text';
+    } else {
+      // どちらも結果がない場合
+      finalTranscription = '文字起こしできる内容がありませんでした。';
+      transcriptionSource = 'なし';
+    }
+    
+    logInfo(`✅ 文字起こし結果 (${transcriptionSource}): ${finalTranscription}`);
+    
+    // 文字起こし結果を投稿
+    postTranscription(event.channel, finalTranscription);
+    logInfo('✅ 文字起こし結果を投稿しました');
+    
+    // 元のメッセージを削除（試行）
+    try {
+      deleteOriginalMessage(event.channel, event.ts);
+      logInfo('✅ 元のボイスメモを削除しました');
+    } catch (error) {
+      logWarning('⚠️ 元のボイスメモを削除できませんでした: ' + error);
+    }
+    
   } catch (error) {
-    logWarning('⚠️ 元のボイスメモを削除できませんでした: ' + error);
-    // 処理は続行
+    logError('❌ 音声処理エラー: ' + JSON.stringify(error));
   }
-
-  logInfo('✅ 元のボイスメモを削除しました');
 }
 
 /**
@@ -365,103 +361,162 @@ function downloadFile(fileUrl: string): GoogleAppsScript.Base.Blob | null {
  * @param audioBlob 音声データのBlobオブジェクト
  * @returns 文字起こしテキスト
  */
+/**
+ * 音声ファイルを文字起こし - 高度な認識設定
+ * @param audioBlob 音声データのBlobオブジェクト
+ * @returns 文字起こしテキスト
+ */
 function transcribeAudio(audioBlob: GoogleAppsScript.Base.Blob): string {
   logInfo('🔍 transcribeAudio関数が呼び出されました');
-
+  
   try {
     // Google Cloud APIキーを取得
-    const apiKeyJson = PropertiesService.getScriptProperties().getProperty(
-      'GOOGLE_CLOUD_API_KEY'
-    );
+    const apiKeyJson = PropertiesService.getScriptProperties().getProperty('GOOGLE_CLOUD_API_KEY');
     if (!apiKeyJson) {
-      throw new Error(
-        'Speech-to-Text API設定が見つかりません。setupSpeechToTextAPI()関数を実行してください。'
-      );
+      throw new Error('Speech-to-Text API設定が見つかりません。setupSpeechToTextAPI()関数を実行してください。');
     }
-
+    
     // 音声をBase64にエンコード
     const base64Audio = Utilities.base64Encode(audioBlob.getBytes());
-
+    
     // サービスアカウントキーをパース
-    const serviceAccount = JSON.parse(apiKeyJson) as GcpMinimalServiceAccount;
-
+    const serviceAccount = JSON.parse(apiKeyJson);
+    
     // JWTトークンを生成
     const jwt = generateJWT(serviceAccount);
-
+    
     // アクセストークンを取得
-    const tokenResponse = UrlFetchApp.fetch(
-      'https://oauth2.googleapis.com/token',
-      {
-        method: 'post',
-        payload: {
-          grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-          assertion: jwt,
-        },
-        muteHttpExceptions: true,
-      }
-    );
-
+    const tokenResponse = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
+      method: 'post',
+      payload: {
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt
+      },
+      muteHttpExceptions: true
+    });
+    
     logInfo('Token response code: ' + tokenResponse.getResponseCode());
-    logInfo('Token response text: ' + tokenResponse.getContentText());
-
+    
     const tokenData = JSON.parse(tokenResponse.getContentText());
-
     if (!tokenData.access_token) {
-      throw new Error(
-        'アクセストークンを取得できませんでした: ' +
-          tokenResponse.getContentText()
-      );
+      throw new Error('アクセストークンを取得できませんでした: ' + tokenResponse.getContentText());
     }
-
+    
     const accessToken = tokenData.access_token;
-
-    // Google Cloud Speech-to-Text APIリクエスト
+    
+    // Slackボイスメモに最適化したGoogle Cloud Speech-to-Text APIリクエスト
     const requestData = {
       config: {
-        // encoding指定を削除し、APIに自動判定させる
-        sampleRateHertz: 16000, // モバイル録音に一般的なレート
+        // encodingとsampleRateHertz省略 - 自動検出が最適
         languageCode: 'ja-JP',
-        model: 'default',
-        enableAutomaticPunctuation: true,
-        // mp4/m4aに対応する設定を追加
-        audioChannelCount: 1,
-        useEnhanced: true // 拡張音声認識モデルを使用
+        alternativeLanguageCodes: ['en-US'], // バイリンガル対応（日本語・英語）
+        
+        // モデル選択 - ボイスメモは通常短めなので適切なモデルを選択
+        model: 'latest_short',
+        useEnhanced: true, // 拡張モデルを使用
+        
+        // 認識精度向上のための設定
+        enableAutomaticPunctuation: true, // 自動的に句読点を入れる
+        enableWordConfidence: true,       // 単語ごとの信頼度を取得
+        profanityFilter: false,           // フィルタリングなし
+        maxAlternatives: 3,               // 最大3つの代替候補を取得
+        
+        // より自然な音声認識のための設定
+        enableSpokenPunctuation: false,   // 句読点の読み上げは変換しない
+        enableSpokenEmojis: true,         // 「ハート」などの絵文字は変換する
+        
+        // メタデータ設定
+        metadata: {
+          interactionType: 'DICTATION',          // 口述/メモ
+          recordingDeviceType: 'SMARTPHONE',     // スマートフォンでの録音
+          microphoneDistance: 'NEARFIELD',       // 近距離マイク
+          originalMediaType: 'AUDIO',            // 音声録音
+          audioTopic: 'voice memo',              // ボイスメモ
+          industryNaicsCodeOfAudio: 519190       // その他の情報サービス
+        },
+        
+        // 音声に特化したコンテキスト（オプション）
+        speechContexts: [
+          {
+            phrases: [
+              // よく使われる可能性のあるビジネス用語やIT用語
+              "スラック", "ボイスメモ", "文字起こし", "プロジェクト", "タスク",
+              "ミーティング", "アジェンダ", "クラウド", "サーバー", "API",
+              "スプレッドシート", "ドキュメント", "プレゼンテーション"
+            ],
+            boost: 10 // これらの単語を優先的に認識
+          }
+        ]
       },
       audio: {
         content: base64Audio
       }
     };
-
+    
     const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
       method: 'post',
       contentType: 'application/json',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        'Authorization': `Bearer ${accessToken}`
       },
       payload: JSON.stringify(requestData),
-      muteHttpExceptions: true,
+      muteHttpExceptions: true
     };
-
-    const response = UrlFetchApp.fetch(
-      'https://speech.googleapis.com/v1/speech:recognize',
-      options
-    );
-
+    
+    // 最新のAPIエンドポイントを使用
+    const response = UrlFetchApp.fetch('https://speech.googleapis.com/v1/speech:recognize', options);
+    
     logInfo('API response code: ' + response.getResponseCode());
-    logInfo('API response text: ' + response.getContentText());
-
-    const responseData = JSON.parse(response.getContentText());
-
-    // レスポンスから文字起こし結果を抽出
-    if (responseData.results && responseData.results.length > 0) {
-      let transcription = '';
-      for (const result of responseData.results) {
-        transcription += result.alternatives[0].transcript + ' ';
-      }
-      return transcription.trim();
-    } else {
-      return '文字起こしできる内容がありませんでした。';
+    const responseText = response.getContentText();
+    logInfo('API response summary: ' + responseText.substring(0, 200) + '...');
+    
+    const responseData = JSON.parse(responseText);
+    
+    // 課金情報の記録
+    if (responseData.totalBilledTime) {
+      logInfo('課金時間: ' + responseData.totalBilledTime);
     }
+    
+    // 結果の処理と信頼度による選別
+    if (responseData.results && responseData.results.length > 0) {
+      // 認識された結果をすべて格納
+      const allTranscripts = [];
+      let bestConfidence = 0;
+      let bestTranscript = '';
+      
+      for (const result of responseData.results) {
+        if (result.alternatives && result.alternatives.length > 0) {
+          // 各セグメントで最も信頼度の高い結果を選択
+          const alternative = result.alternatives[0];
+          const transcript = alternative.transcript || '';
+          const confidence = alternative.confidence || 0;
+          
+          // 信頼度情報を記録
+          logInfo(`部分文字起こし - 信頼度: ${confidence.toFixed(2)}, テキスト: ${transcript}`);
+          
+          // 全体で最も信頼度の高い部分を記録
+          if (confidence > bestConfidence) {
+            bestConfidence = confidence;
+            bestTranscript = transcript;
+          }
+          
+          allTranscripts.push(transcript);
+        }
+      }
+      
+      // 結果をつなげて返す
+      if (allTranscripts.length > 0) {
+        const fullTranscription = allTranscripts.join(' ').trim();
+        logInfo(`最終文字起こし結果 (信頼度: ${bestConfidence.toFixed(2)}): ${fullTranscription}`);
+        return fullTranscription;
+      } else if (bestTranscript) {
+        // 最も信頼度の高い部分だけでも返す
+        return bestTranscript;
+      }
+    }
+    
+    // 認識結果がない場合
+    return '文字起こしできる内容がありませんでした。';
   } catch (error) {
     logError('Transcription error: ' + JSON.stringify(error));
     return `音声の文字起こし中にエラーが発生しました: ${error}`;
