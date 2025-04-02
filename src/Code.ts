@@ -328,7 +328,7 @@ function cleanupPendingTranscription(): void {
 }
 
 /**
- * Slackのトランスクリプション機能を使用
+ * Slackのトランスクリプト機能を使用
  * @param file ファイル情報オブジェクト
  * @param channelId チャンネルID
  * @param timestamp タイムスタンプ
@@ -338,6 +338,9 @@ function useSlackTranscription(file: any, channelId: string, timestamp: string):
   let transcription = '文字起こしできる内容がありませんでした。';
   
   try {
+    // ファイルIDを保存（後で削除するため）
+    const fileId = file.id;
+    
     // Slackのトランスクリプションチェック
     if (file.transcription) {
       logInfo(`Slackトランスクリプション状態: ${file.transcription.status}`);
@@ -351,7 +354,7 @@ function useSlackTranscription(file: any, channelId: string, timestamp: string):
           // プレビューのみで一部の場合は完全版を取得
           if (file.transcription.preview.has_more) {
             logInfo('トランスクリプションの続きがあります。完全版を取得します。');
-            const fullTranscription = getFullTranscription(file.id);
+            const fullTranscription = getFullTranscription(fileId);
             
             if (fullTranscription) {
               transcription = fullTranscription;
@@ -364,30 +367,29 @@ function useSlackTranscription(file: any, channelId: string, timestamp: string):
         } else {
           logInfo('トランスクリプションが完了していますが、内容が見つかりません');
         }
+        
+        // 文字起こし結果を投稿
+        postTranscription(channelId, transcription);
+        
+        // ファイルを削除
+        deleteFile(fileId);
+        
       } else if (file.transcription.status === 'processing') {
-        // まだ処理中の場合、待機してから再試行するオプション
-        logInfo('トランスクリプションは処理中です。しばらく待ってから再試行することをお勧めします。');
-        transcription = '音声の文字起こしは処理中です。しばらくしてから再度確認してください。';
+        // まだ処理中の場合は、処理中メッセージを送信
+        // 元のファイルは残しておく（トランスクリプト完了後にSlack内で確認できるように）
+        logInfo('トランスクリプションは処理中です。処理中メッセージを送信します。');
+        postTranscription(channelId, '音声の文字起こしは処理中です。しばらくするとSlack内でファイルのトランスクリプトが利用可能になります。');
       } else if (file.transcription.status === 'failed') {
         // 失敗した場合
         logInfo('Slackのトランスクリプションが失敗しました。');
-        transcription = '音声の文字起こしに失敗しました。';
+        postTranscription(channelId, '音声の文字起こしに失敗しました。');
       } else {
         logInfo(`不明なトランスクリプション状態: ${file.transcription.status}`);
+        postTranscription(channelId, '文字起こし状態を確認できませんでした。');
       }
     } else {
       logInfo('このファイルにはトランスクリプション情報がありません。');
-    }
-    
-    // 文字起こし結果をSlackに投稿
-    postTranscription(channelId, transcription);
-    
-    // 元のメッセージを削除（オプション）
-    try {
-      deleteOriginalMessage(channelId, timestamp);
-      logInfo('元のメッセージを削除しました');
-    } catch (error) {
-      logWarning(`元メッセージの削除に失敗: ${error}`);
+      postTranscription(channelId, 'このファイルには文字起こし情報がありません。');
     }
     
   } catch (error) {
@@ -615,34 +617,30 @@ function postTranscription(channelId: string, text: string): boolean {
 }
 
 /**
- * 改善された元のボイスメモメッセージ削除
- * @param channelId チャンネルID
- * @param timestamp 削除するメッセージのタイムスタンプ
+ * Slackのファイルを削除する関数
+ * @param fileId 削除するファイルのID
  * @returns 削除成功のブール値
  */
-function deleteOriginalMessage(channelId: string, timestamp: string): boolean {
-  logInfo(
-    `🔍 元のメッセージ削除開始: チャンネル=${channelId}, タイムスタンプ=${timestamp}`
-  );
+function deleteFile(fileId: string): boolean {
+  logInfo(`🔍 ファイル削除開始: ファイルID=${fileId}`);
 
   const SLACK_CONFIG = getSlackConfig();
 
   // ユーザートークンが設定されているか確認
   if (!SLACK_CONFIG.userToken) {
-    logError('❌ ユーザートークンが設定されていません。メッセージを削除できません。');
+    logError('❌ ユーザートークンが設定されていません。ファイルを削除できません。');
     return false;
   }
 
-  const url = 'https://slack.com/api/chat.delete';
+  const url = 'https://slack.com/api/files.delete';
   const payload = {
-    channel: channelId,
-    ts: timestamp,
+    file: fileId
   };
 
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'post',
     headers: {
-      Authorization: `Bearer ${SLACK_CONFIG.userToken}`, // メッセージ削除にはユーザートークンが必要
+      Authorization: `Bearer ${SLACK_CONFIG.userToken}`, // ファイル削除にはユーザートークンが必要
       'Content-Type': 'application/json',
     },
     payload: JSON.stringify(payload),
@@ -650,14 +648,14 @@ function deleteOriginalMessage(channelId: string, timestamp: string): boolean {
   };
 
   try {
-    logInfo('メッセージ削除リクエスト送信中...');
+    logInfo(`ファイル削除リクエスト送信中... ファイルID: ${fileId}`);
     const response = UrlFetchApp.fetch(url, options);
     const responseCode = response.getResponseCode();
     
-    logInfo(`メッセージ削除レスポンスコード: ${responseCode}`);
+    logInfo(`ファイル削除レスポンスコード: ${responseCode}`);
     
     if (responseCode !== 200) {
-      logError(`メッセージ削除HTTP エラー: ${responseCode}`);
+      logError(`ファイル削除HTTP エラー: ${responseCode}`);
       return false;
     }
     
@@ -665,26 +663,23 @@ function deleteOriginalMessage(channelId: string, timestamp: string): boolean {
 
     if (!responseData.ok) {
       // エラーの種類を確認
-      if (responseData.error === 'cant_delete_message') {
-        logError('❌ メッセージ削除権限エラー: 他ユーザーのメッセージを削除する権限がありません');
-        logInfo('ユーザートークンの権限設定を確認してください。削除には User Token Scopes の chat:write と groups:write または channels:write が必要です。');
+      if (responseData.error === 'cant_delete_file') {
+        logError('❌ ファイル削除権限エラー: このファイルを削除する権限がありません');
+        logInfo('ユーザートークンの権限設定を確認してください。ファイル削除には User Token Scopes の files:write が必要です。');
         return false;
-      } else if (responseData.error === 'message_not_found') {
-        logError('❌ メッセージが見つかりません');
-        return false;
-      } else if (responseData.error === 'channel_not_found') {
-        logError('❌ チャンネルが見つかりません');
+      } else if (responseData.error === 'file_not_found') {
+        logError('❌ ファイルが見つかりません');
         return false;
       } else {
-        logError(`❌ メッセージ削除エラー: ${responseData.error}`);
+        logError(`❌ ファイル削除エラー: ${responseData.error}`);
         return false;
       }
     }
     
-    logInfo('✅ 元のメッセージを削除しました');
+    logInfo(`✅ ファイルID: ${fileId} を削除しました`);
     return true;
   } catch (error) {
-    logError(`❌ メッセージ削除エラー: ${JSON.stringify(error)}`);
+    logError(`❌ ファイル削除エラー: ${JSON.stringify(error)}`);
     return false;
   }
 }

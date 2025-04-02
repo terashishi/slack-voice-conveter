@@ -2,25 +2,27 @@
 
 ## 概要
 
-このアプリケーションは、Slack上で共有されたボイスメモを自動的に文字起こしして再投稿し、元のボイスメモを削除するための Google Apps Script (GAS) アプリケーションです。このバージョンでは、Slackの内部文字起こし機能（トランスクリプション）を利用しています。
+このアプリケーションは、Slack上で共有されたボイスメモを自動的に文字起こしして再投稿し、文字起こし完了後に元のボイスメモファイルを削除するための Google Apps Script (GAS) アプリケーションです。このバージョンでは、Slackの内部文字起こし機能（トランスクリプション）を利用しています。
 
 ## 機能
 
 - Slack上でボイスメモが共有された時に自動検知
 - Slackのネイティブ文字起こし機能を利用してテキスト化
 - 文字起こし結果をテキストメッセージとして投稿
-- 元のボイスメモメッセージを削除（オプション）
+- 文字起こし完了後、元のボイスメモファイルを削除（トランスクリプション完了時のみ）
 - 詳細なログ記録
 
-## システムアーキテクチャ
+## 処理フロー
 
-システムは以下のコンポーネントから構成されています：
-
-1. **Slackワークスペース**: ユーザーがボイスメモを投稿
-2. **Google Apps Script (GAS) Webアプリ**:
-   - イベント処理: Slackからのイベントを受信・処理
-   - ファイル処理: 音声ファイルのメタデータと文字起こし情報を取得
-   - メッセージ管理: 結果の投稿と元メッセージの削除
+1. ユーザーがSlackチャンネルにボイスメモを投稿
+2. アプリがイベントを検知し、ファイル情報を取得
+3. Slackのトランスクリプト状態を確認
+4. トランスクリプトが完了していれば:
+   - 文字起こし結果をテキストとして投稿
+   - 元のボイスメモファイルを削除
+5. トランスクリプトが処理中であれば:
+   - 「処理中」メッセージを投稿
+   - 元のファイルはそのままにしておく（後でSlack内でトランスクリプトが利用可能になる）
 
 ## セットアップ手順
 
@@ -58,8 +60,8 @@
    - `chat:write`
    - `files:read`
 10. 「User Token Scopes」に以下を追加:
-    - `chat:write`
-    - `channels:write`（またはプライベートチャンネル用に`groups:write`）
+    - `files:write` (ファイル削除に必要)
+    - `chat:write` (メッセージ投稿に必要)
 11. ページ上部の「Install to Workspace」をクリックして、アプリをインストール
 12. ボットトークン（`xoxb-`で始まる）とユーザートークン（`xoxp-`で始まる）をコピー
 
@@ -79,7 +81,17 @@ GASエディターで以下の関数を順に実行します：
    }
    ```
 
-3. `checkAllSettings()` - すべての設定が正しく行われていることを確認
+3. `validateTokenPermissions()` - トークンの権限を検証
+   ```javascript
+   function testTokens() {
+     const scriptProperties = PropertiesService.getScriptProperties();
+     const botToken = scriptProperties.getProperty('SLACK_BOT_TOKEN');
+     const userToken = scriptProperties.getProperty('SLACK_USER_TOKEN');
+     
+     if (botToken) validateTokenPermissions(botToken, 'ボット');
+     if (userToken) validateTokenPermissions(userToken, 'ユーザー');
+   }
+   ```
 
 ### 5. テスト
 
@@ -106,18 +118,22 @@ const blocks = [
 ];
 ```
 
-### 2. 元メッセージの削除オプション
+### 2. ファイル削除の無効化
 
-元のボイスメモメッセージを削除したくない場合は、`useSlackTranscription()` 関数内の該当部分をコメントアウトまたは削除できます：
+ファイルを削除したくない場合は、`useSlackTranscription()` 関数内の次の部分をコメントアウトできます：
 
 ```javascript
-// 元のメッセージを削除（オプション）- 削除したくない場合はコメントアウト
-// try {
-//   deleteOriginalMessage(channelId, timestamp);
-//   logInfo('元のメッセージを削除しました');
-// } catch (error) {
-//   logWarning(`元メッセージの削除に失敗: ${error}`);
-// }
+// ファイルを削除
+// deleteFile(fileId);
+```
+
+### 3. 手動でのトランスクリプト確認
+
+特定のファイルのトランスクリプト状態を確認する場合は、`checkFileTranscription()` 関数を使用できます：
+
+```javascript
+// ファイルIDを指定して実行
+checkFileTranscription('F01234567890');
 ```
 
 ## トラブルシューティング
@@ -133,9 +149,10 @@ const blocks = [
    - Slackのボイスメモ文字起こし機能が有効になっているか確認
    - アプリが`files:read`権限を持っているか確認
 
-3. **元のメッセージが削除されない**
+3. **ファイルが削除されない**
    - ユーザートークンが正しく設定されているか確認
-   - ユーザートークンに `chat:write` と `channels:write` 権限があるか確認
+   - ユーザートークンに `files:write` 権限があるか確認
+   - トランスクリプションが完了しているかどうか確認（処理中の場合は削除されません）
 
 ### ログの確認
 
@@ -151,41 +168,8 @@ const blocks = [
 
 - **v1.0.0** - 初回リリース（Google Cloud Speech-to-Text API使用）
 - **v2.0.0** - Slackのネイティブ文字起こし機能を使用するようにアップデート
+- **v2.1.0** - メッセージ削除からファイル削除に変更、処理中ファイルの取り扱い改善
 
 ## ライセンス
 
 MIT License
-
-## 開発者向け情報
-
-### ファイル構成
-
-- **Code.ts**: メインスクリプト（GASのEntryPoint）
-- **slack.ts**: Slack API操作関連の関数
-- **logger.ts**: ログ記録関連の関数
-- **setup.ts**: 設定関連の関数
-
-### ローカル開発（オプション）
-
-clasp を使用したローカル開発も可能です：
-
-```bash
-# Google clasp のインストール
-npm install -g @google/clasp
-
-# プロジェクトの初期化
-mkdir slack-voice-converter
-cd slack-voice-converter
-npm init -y
-npm install --save-dev typescript @types/google-apps-script
-
-# claspへのログイン
-clasp login
-
-# プロジェクトのクローンまたは作成
-clasp clone <SCRIPT_ID>  # または clasp create --title "Slack Voice Converter"
-
-# ビルドとアップロード
-npm run build
-clasp push
-```
