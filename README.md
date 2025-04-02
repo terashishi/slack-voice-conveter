@@ -1,4 +1,4 @@
-# Slack ボイスメモ文字起こしアプリ
+# Slack ボイスメモ文字起こしコンバーター
 
 ## 概要
 
@@ -52,18 +52,110 @@ clasp login
 
 ```bash
 # 新しいスクリプトプロジェクトを作成
-clasp create --title "Slack Voice converter" --type standalone
+clasp create --title "Slack Voice Converter" --type standalone
 ```
 
 5. **必要なファイルの作成**
 
-package.jsonファイル、tsconfig.jsonファイル、コードファイル（src/Code.ts）を作成します。
-このリポジトリに含まれるファイルをプロジェクトディレクトリにコピーするか、以下のように手動で作成します：
+以下のファイルを作成します：
 
-- **package.json** - npm依存関係管理用
+- **package.json** - npm依存関係とスクリプト管理用
 - **tsconfig.json** - TypeScriptコンパイラ設定用
 - **src/Code.ts** - スクリプト本体
+- **src/appsscript.json** - GASマニフェストファイル
 - **.clasp.json** - clasp設定用
+
+## プロジェクト構造
+
+正しいプロジェクト構造は以下のようになります：
+
+```
+slack-voice-converter/
+├── .clasp.json            // claspの設定ファイル
+├── package.json           // npmの設定ファイル
+├── tsconfig.json          // TypeScriptの設定ファイル
+├── README.md              // このファイル
+├── build/                 // コンパイル後のファイルが保存されるディレクトリ
+│   ├── appsscript.json    // GASマニフェストファイル (ビルド時にコピーされる)
+│   └── Code.js            // コンパイル後のJavaScriptコード
+└── src/                   // ソースコードディレクトリ
+    ├── appsscript.json    // GASマニフェストファイル (元ファイル)
+    └── Code.ts            // TypeScriptのソースコード
+```
+
+### 重要なファイル
+
+#### .clasp.json (claspの設定)
+
+```json
+{
+  "scriptId": "YOUR_SCRIPT_ID_HERE",
+  "rootDir": "build",
+  "scriptExtensions": [
+    ".js",
+    ".gs"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ]
+}
+```
+
+#### src/appsscript.json (GASマニフェスト)
+
+```json
+{
+  "timeZone": "Asia/Tokyo",
+  "dependencies": {
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
+}
+```
+
+#### tsconfig.json (TypeScript設定)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "None",
+    "lib": ["ESNext"],
+    "esModuleInterop": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "outDir": "build"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
+```
+
+#### package.json (npmスクリプト)
+
+```json
+{
+  "name": "slack-voice-converter",
+  "version": "1.0.0",
+  "description": "Slack voice memo converter using Google Apps Script",
+  "main": "build/Code.js",
+  "scripts": {
+    "build": "tsc && cp src/appsscript.json build/",
+    "push": "npm run build && clasp push",
+    "deploy": "npm run push && clasp deploy",
+    "watch": "tsc --watch",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
+```
 
 ## 開発ワークフロー
 
@@ -137,6 +229,39 @@ const SLACK_CONFIG: SlackConfig = {
    
    サンプルコードには、Google ドキュメントと Google ドライブを利用した簡易的な実装が含まれています。
 
+## よくあるエラーと解決策
+
+### マニフェストファイルが見つからない場合
+
+エラーメッセージ: `Project contents must include a manifest file named appsscript.`
+
+解決策: 
+- `src/appsscript.json` ファイルを作成していることを確認
+- `package.json` の `build` スクリプトでマニフェストファイルを `build` ディレクトリにコピーしていることを確認:
+  ```json
+  "build": "tsc && cp src/appsscript.json build/"
+  ```
+
+### TypeScriptのコンパイルエラー
+
+エラーメッセージ: `構成ファイル 'tsconfig.json' で入力が見つかりませんでした`
+
+解決策:
+- `tsconfig.json` の `include` パスが正しいことを確認:
+  ```json
+  "include": ["src/**/*"]
+  ```
+- ソースファイルが `src` ディレクトリに存在することを確認
+
+### claspのプッシュエラー
+
+エラーメッセージ: 更新が反映されない
+
+解決策:
+- `.clasp.json` の `rootDir` が正しいことを確認（通常は `"rootDir": "build"`）
+- `npm run build` が成功していることを確認
+- 手動でプッシュを試す: `clasp push`
+
 ## 注意点
 
 1. **トークンのセキュリティ**: コードに直接トークンを埋め込むのはセキュリティ上リスクがあります。本番環境では、PropertiesServiceを使用してトークンを管理することを検討してください。
@@ -146,17 +271,6 @@ const SLACK_CONFIG: SlackConfig = {
 3. **音声認識の精度**: 音声認識の精度は使用するAPIや設定、言語によって異なります。日本語の認識精度向上には適切な設定が必要です。
 
 4. **メッセージ削除の権限**: Slackでメッセージを削除するには、そのメッセージを投稿したユーザーのトークンが必要です。ボットによって共有されたボイスメモを削除するには、適切な権限が必要です。
-
-## トラブルシューティング
-
-### ビルドエラー
-TypeScriptのコンパイル時にエラーが出る場合は、`tsconfig.json` の設定と型定義を確認してください。
-
-### 認証エラー
-Slack APIとの通信時に認証エラーが発生する場合は、トークンの権限範囲とトークンが有効かを確認してください。
-
-### ボイスメモが検出されない
-Slack Event APIの設定が正しいか、イベントの購読設定が適切に行われているかを確認してください。
 
 ## ライセンス
 
